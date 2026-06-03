@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-amd64
+            runner: ubuntu-latest
+            install: sudo apt-get update && sudo apt-get install -y libolm-dev libolm3
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+            install: sudo apt-get update && sudo apt-get install -y libolm-dev libolm3
+          - target: darwin-arm64
+            runner: macos-latest
+            install: brew install libolm
+            # Homebrew on Apple Silicon installs to /opt/homebrew; cgo needs
+            # explicit paths since the compiler doesn't search there by default.
+            cgo_cflags: -I/opt/homebrew/include
+            cgo_ldflags: -L/opt/homebrew/lib
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Install libolm
+        run: ${{ matrix.install }}
+
+      - name: Build
+        env:
+          CGO_CFLAGS: ${{ matrix.cgo_cflags }}
+          CGO_LDFLAGS: ${{ matrix.cgo_ldflags }}
+        run: |
+          ./build.sh
+          mv tumblr-dms tumblr-dms-${{ matrix.target }}
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: tumblr-dms-${{ matrix.target }}
+          path: tumblr-dms-${{ matrix.target }}
+          retention-days: 1
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate sha256sums
+        working-directory: artifacts
+        run: sha256sum tumblr-dms-* > sha256sums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: false
+          body: |
+            Pre-built binaries for the Tumblr DMs bridge.
+
+            Download the one matching your OS/CPU, then:
+
+            ```sh
+            chmod +x tumblr-dms-<your-target>
+            mv tumblr-dms-<your-target> tumblr-dms
+            ```
+
+            See [README](https://github.com/beeper/tumblr-dms/blob/main/README.md) for setup steps.

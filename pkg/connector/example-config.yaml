@@ -1,0 +1,4 @@
+displayname_template: "{{ if .DisplayName }}{{ .DisplayName }}{{ else }}{{ .Username }}{{ end }}"
+conversation_sync_limit: 50
+request_timeout_seconds: 30
+user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36"
