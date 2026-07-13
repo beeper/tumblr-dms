@@ -65,15 +65,17 @@ type Options struct {
 }
 
 type Client struct {
-	mu           sync.RWMutex
-	webBaseURL   string
-	apiBaseURL   string
-	userAgent    string
-	cookieHeader string
-	apiToken     string
-	csrfToken    string
-	apiVersion   string
-	httpClient   *http.Client
+	mu             sync.RWMutex
+	authRefreshMu  sync.Mutex
+	authGeneration uint64
+	webBaseURL     string
+	apiBaseURL     string
+	userAgent      string
+	cookieHeader   string
+	apiToken       string
+	csrfToken      string
+	apiVersion     string
+	httpClient     *http.Client
 }
 
 type ImageUpload struct {
@@ -501,6 +503,36 @@ func (c *Client) hasCSRFToken() bool {
 }
 
 func (c *Client) Bootstrap(ctx context.Context) error {
+	c.authRefreshMu.Lock()
+	defer c.authRefreshMu.Unlock()
+	return c.bootstrap(ctx)
+}
+
+func (c *Client) bootstrapIfNeeded(ctx context.Context, mutating bool) error {
+	c.authRefreshMu.Lock()
+	defer c.authRefreshMu.Unlock()
+	if !c.needsBootstrap(mutating) {
+		return nil
+	}
+	return c.bootstrap(ctx)
+}
+
+func (c *Client) refreshAuthAfterFailure(ctx context.Context, failedGeneration uint64) error {
+	c.authRefreshMu.Lock()
+	defer c.authRefreshMu.Unlock()
+	if c.currentAuthGeneration() != failedGeneration {
+		return nil
+	}
+	return c.bootstrap(ctx)
+}
+
+func (c *Client) currentAuthGeneration() uint64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.authGeneration
+}
+
+func (c *Client) bootstrap(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.webBaseURL+"/messaging", nil)
 	if err != nil {
 		return err
@@ -517,7 +549,7 @@ func (c *Client) Bootstrap(ctx context.Context) error {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return &BootstrapError{
 			Message: fmt.Sprintf("failed to load Tumblr messaging page: HTTP %d", resp.StatusCode),
-			Auth:    resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden,
+			Auth:    resp.StatusCode == http.StatusUnauthorized,
 		}
 	}
 	if isLoginPath(resp.Request.URL.Path) {
@@ -563,6 +595,7 @@ func (c *Client) bootstrapFromHTML(html string) error {
 	}
 	c.apiToken = apiToken
 	c.csrfToken = csrfToken
+	c.authGeneration++
 	c.mu.Unlock()
 	return nil
 }
@@ -1474,7 +1507,7 @@ func escapeMultipartQuotedString(value string) string {
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body any, out any) error {
 	mutating := isMutating(method)
 	if c.needsBootstrap(mutating) {
-		if err := c.Bootstrap(ctx); err != nil {
+		if err := c.bootstrapIfNeeded(ctx, mutating); err != nil {
 			return err
 		}
 	}
@@ -1483,12 +1516,26 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	}
 
 	var err error
-	for attempt := 0; ; attempt++ {
+	authRetried := false
+	transientAttempt := 0
+	for {
+		requestGeneration := c.currentAuthGeneration()
 		err = c.doOnce(ctx, method, path, query, body, out)
-		if !isRetryableTransientSendError(method, path, err) || attempt >= len(apiTransientRetryDelays) {
+		if IsAuthRefreshCandidate(err) && !authRetried {
+			authRetried = true
+			if err = c.refreshAuthAfterFailure(ctx, requestGeneration); err != nil {
+				return err
+			}
+			if mutating && !c.hasCSRFToken() {
+				return fmt.Errorf("tumblr API CSRF token is missing")
+			}
+			continue
+		}
+		if !isRetryableTransientSendError(method, path, err) || transientAttempt >= len(apiTransientRetryDelays) {
 			return err
 		}
-		delay := apiTransientRetryDelays[attempt]
+		delay := apiTransientRetryDelays[transientAttempt]
+		transientAttempt++
 		if delay <= 0 {
 			continue
 		}
@@ -1566,13 +1613,6 @@ func (c *Client) doOnce(ctx context.Context, method, path string, query url.Valu
 			Status:     "Tumblr session is not logged in",
 		}
 	}
-	if isAPIAuthStatus(resp.StatusCode) {
-		return &Error{
-			StatusCode: resp.StatusCode,
-			Status:     safeErrorDetail(resp.Status),
-		}
-	}
-
 	responseBody, err := readLimitedBody(resp.Body, maxAPIResponseBytes, "Tumblr API response")
 	if err != nil {
 		return err
@@ -1619,10 +1659,6 @@ func (c *Client) doOnce(ctx context.Context, method, path string, query url.Valu
 		return fmt.Errorf("failed to parse Tumblr response: %w", err)
 	}
 	return nil
-}
-
-func isAPIAuthStatus(statusCode int) bool {
-	return statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden
 }
 
 func responseCSRFToken(headers http.Header) string {

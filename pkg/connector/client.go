@@ -31,10 +31,14 @@ type TumblrClient struct {
 	userLogin *bridgev2.UserLogin
 	client    *tumblr.Client
 	loggedIn  atomic.Bool
+	stateLock sync.Mutex
 
-	pushLock   sync.Mutex
-	pushCancel context.CancelFunc
-	pushWG     sync.WaitGroup
+	pushLock             sync.Mutex
+	pushRegistrationLock sync.Mutex
+	pushMetadataLock     sync.Mutex
+	pushCancel           context.CancelFunc
+	pushWG               sync.WaitGroup
+	pushRegistrationDown atomic.Bool
 
 	syncLock sync.Mutex
 	seenLock sync.Mutex
@@ -88,8 +92,16 @@ func (tc *TumblrClient) sendBridgeState(state status.BridgeState) {
 }
 
 func (tc *TumblrClient) failConnect(state status.BridgeState) {
+	tc.stateLock.Lock()
+	defer tc.stateLock.Unlock()
 	tc.loggedIn.Store(false)
 	tc.sendBridgeState(state)
+}
+
+func (tc *TumblrClient) setLoggedIn(loggedIn bool) {
+	tc.stateLock.Lock()
+	defer tc.stateLock.Unlock()
+	tc.loggedIn.Store(loggedIn)
 }
 
 func (tc *TumblrClient) handleRemoteError(err error) error {
@@ -100,14 +112,19 @@ func (tc *TumblrClient) handleRemoteError(err error) error {
 }
 
 func tumblrBadCredentialsState(err error) status.BridgeState {
+	return tumblrBadCredentialsStateWithCode("tumblr-bad-credentials", err)
+}
+
+func tumblrBadCredentialsStateWithCode(errorCode status.BridgeStateErrorCode, err error) status.BridgeState {
 	message := ""
 	if err != nil {
 		message = err.Error()
 	}
 	return status.BridgeState{
 		StateEvent: status.StateBadCredentials,
-		Error:      "tumblr-bad-credentials",
+		Error:      errorCode,
 		Message:    message,
+		UserAction: status.UserActionRelogin,
 	}
 }
 
@@ -137,7 +154,7 @@ func (tc *TumblrConnector) LoadUserLogin(_ context.Context, login *bridgev2.User
 	if login == nil || login.UserLogin == nil {
 		return fmt.Errorf("tumblr user login is missing")
 	}
-	meta, err := validateUserLoginMetadata(login.Metadata)
+	meta, err := normalizeUserLoginMetadata(login.Metadata)
 	if err != nil {
 		return err
 	}
@@ -158,13 +175,10 @@ func (tc *TumblrClient) Connect(ctx context.Context) {
 		return
 	}
 	tc.sendBridgeState(status.BridgeState{StateEvent: status.StateConnecting})
+	tc.pushRegistrationDown.Store(false)
 	meta, err := tc.validatedLoginMetadata()
 	if err != nil {
-		tc.failConnect(status.BridgeState{
-			StateEvent: status.StateBadCredentials,
-			Error:      "tumblr-invalid-login-metadata",
-			Message:    err.Error(),
-		})
+		tc.failConnect(tumblrBadCredentialsStateWithCode("tumblr-invalid-login-metadata", err))
 		return
 	}
 	client, err := tc.tumblrClient()
@@ -195,14 +209,10 @@ func (tc *TumblrClient) Connect(ctx context.Context) {
 	}
 	blog, err := selectedBlogFromCurrentUser(userInfo, meta)
 	if err != nil {
-		tc.failConnect(status.BridgeState{
-			StateEvent: status.StateBadCredentials,
-			Error:      "tumblr-selected-blog-unavailable",
-			Message:    err.Error(),
-		})
+		tc.failConnect(tumblrBadCredentialsStateWithCode("tumblr-selected-blog-unavailable", err))
 		return
 	}
-	tc.loggedIn.Store(true)
+	tc.setLoggedIn(true)
 	meta.APIToken = client.APIToken()
 	meta.CSRFToken = client.CSRFToken()
 	meta.APIVersion = client.APIVersion()
@@ -221,11 +231,6 @@ func (tc *TumblrClient) Connect(ctx context.Context) {
 			log.Warn().Err(err).Msg("Failed to save refreshed Tumblr API tokens")
 		}
 	}
-	if err := tc.ensureSelfHostedPushReceiver(ctx); err != nil {
-		if log := tc.log(); log != nil {
-			log.Warn().Err(err).Msg("Failed to start Tumblr web push receiver")
-		}
-	}
 	if err := tc.syncConversations(ctx); err != nil {
 		if tumblr.IsAuthError(err) {
 			tc.failConnect(tumblrBadCredentialsState(err))
@@ -235,7 +240,56 @@ func (tc *TumblrClient) Connect(ctx context.Context) {
 			log.Warn().Err(err).Msg("Failed to sync Tumblr conversations")
 		}
 	}
+	pushCreds, pushErr := tc.prepareSelfHostedPushReceiver(ctx)
+	if pushErr != nil && tumblr.IsAuthError(pushErr) {
+		tc.failConnect(tumblrBadCredentialsState(pushErr))
+		return
+	} else if pushCreds == nil {
+		message := "Tumblr push receiver credentials are missing"
+		if pushErr != nil {
+			message = pushErr.Error()
+		}
+		tc.failConnect(status.BridgeState{
+			StateEvent: status.StateUnknownError,
+			Error:      "tumblr-push-setup-failed",
+			Message:    message,
+		})
+		return
+	}
+	pushUnavailable := pushErr != nil && tc.pushReceiverRegistrationExpired()
+	if pushUnavailable {
+		tc.markPushRegistrationUnavailable(pushErr)
+	}
+	if err := tc.startPushReceiver(ctx, *pushCreds); err != nil {
+		tc.failConnect(status.BridgeState{
+			StateEvent: status.StateUnknownError,
+			Error:      "tumblr-push-receiver-failed",
+			Message:    err.Error(),
+		})
+		return
+	}
+	if log := tc.log(); log != nil {
+		log.Info().Msg("Started Tumblr web push receiver")
+		if pushErr != nil {
+			log.Warn().Err(pushErr).Msg("Initial Tumblr push registration failed; renewal loop will retry")
+		}
+	}
+	if pushUnavailable {
+		return
+	}
 	tc.sendBridgeState(status.BridgeState{StateEvent: status.StateConnected})
+}
+
+func tumblrPushUnavailableState(err error) status.BridgeState {
+	message := ""
+	if err != nil {
+		message = err.Error()
+	}
+	return status.BridgeState{
+		StateEvent: status.StateTransientDisconnect,
+		Error:      "tumblr-push-registration-unavailable",
+		Message:    message,
+	}
 }
 
 func connectBootstrapFailureState(err error) status.BridgeState {
@@ -257,8 +311,8 @@ func (tc *TumblrClient) Disconnect() {
 	if tc == nil {
 		return
 	}
+	tc.setLoggedIn(false)
 	tc.stopPushReceiver()
-	tc.loggedIn.Store(false)
 }
 
 func (tc *TumblrClient) IsLoggedIn() bool {
@@ -279,9 +333,9 @@ func (tc *TumblrClient) LogoutRemote(ctx context.Context) {
 	if tc == nil {
 		return
 	}
+	tc.setLoggedIn(false)
 	tc.stopPushReceiver()
 	tc.unregisterTumblrWebPush(ctx)
-	tc.loggedIn.Store(false)
 }
 
 func (tc *TumblrClient) IsThisUser(_ context.Context, userID networkid.UserID) bool {

@@ -60,7 +60,7 @@ func (e *Error) IsAuthError() bool {
 	if e == nil {
 		return false
 	}
-	if e.StatusCode == http.StatusUnauthorized || e.StatusCode == http.StatusForbidden {
+	if e.StatusCode == http.StatusUnauthorized {
 		return true
 	}
 	for _, apiErr := range e.Errors {
@@ -69,6 +69,10 @@ func (e *Error) IsAuthError() bool {
 		}
 	}
 	return false
+}
+
+func (e *Error) IsAuthRefreshCandidate() bool {
+	return e != nil && (e.IsAuthError() || e.StatusCode == http.StatusForbidden)
 }
 
 func (e *Error) IsNotFound() bool {
@@ -85,6 +89,11 @@ func IsAuthError(err error) bool {
 	}
 	var bootstrapErr *BootstrapError
 	return errors.As(err, &bootstrapErr) && bootstrapErr.IsAuthError()
+}
+
+func IsAuthRefreshCandidate(err error) bool {
+	var apiErr *Error
+	return errors.As(err, &apiErr) && apiErr.IsAuthRefreshCandidate()
 }
 
 func IsNotFound(err error) bool {

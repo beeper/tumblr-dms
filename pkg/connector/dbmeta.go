@@ -213,10 +213,28 @@ func redactedPushKeysValue(keys *PushKeys) string {
 }
 
 func validateUserLoginMetadata(raw any) (*UserLoginMetadata, error) {
+	if _, err := normalizedUserLoginMetadata(raw); err != nil {
+		return nil, err
+	}
+	return raw.(*UserLoginMetadata), nil
+}
+
+func normalizeUserLoginMetadata(raw any) (*UserLoginMetadata, error) {
+	normalized, err := normalizedUserLoginMetadata(raw)
+	if err != nil {
+		return nil, err
+	}
+	meta := raw.(*UserLoginMetadata)
+	*meta = *normalized
+	return meta, nil
+}
+
+func normalizedUserLoginMetadata(raw any) (*UserLoginMetadata, error) {
 	meta, ok := raw.(*UserLoginMetadata)
 	if !ok || meta == nil {
 		return nil, fmt.Errorf("tumblr login metadata is missing")
 	}
+	normalized := *meta
 	cookieHeader := tumblr.CookieHeaderFromMap(map[string]string{"cookie_header": meta.CookieHeader})
 	apiToken := normalizeBearerToken(meta.APIToken)
 	if strings.TrimSpace(cookieHeader) == "" && apiToken == "" {
@@ -240,14 +258,14 @@ func validateUserLoginMetadata(raw any) (*UserLoginMetadata, error) {
 	if !validRemoteID(selectedBlogUUID) {
 		return nil, fmt.Errorf("selected tumblr blog uuid is invalid")
 	}
-	meta.CookieHeader = cookieHeader
-	meta.APIToken = apiToken
-	meta.CSRFToken = normalizeOptionalHeaderCredential(meta.CSRFToken)
-	meta.APIVersion = normalizeOptionalHeaderCredential(meta.APIVersion)
-	meta.UserName = normalizeOptionalMetadataBlogName(meta.UserName)
-	meta.SelectedBlogName = selectedBlogName
-	meta.SelectedBlogUUID = selectedBlogUUID
-	return meta, nil
+	normalized.CookieHeader = cookieHeader
+	normalized.APIToken = apiToken
+	normalized.CSRFToken = normalizeOptionalHeaderCredential(meta.CSRFToken)
+	normalized.APIVersion = normalizeOptionalHeaderCredential(meta.APIVersion)
+	normalized.UserName = normalizeOptionalMetadataBlogName(meta.UserName)
+	normalized.SelectedBlogName = selectedBlogName
+	normalized.SelectedBlogUUID = selectedBlogUUID
+	return &normalized, nil
 }
 
 func normalizeOptionalMetadataBlogName(value string) string {
