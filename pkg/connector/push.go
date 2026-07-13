@@ -14,6 +14,7 @@ import (
 	pushreceiver "github.com/beeper/push-receiver"
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/status"
 
 	"github.com/ifixrobots/tumblr-dms/pkg/tumblr"
 )
@@ -24,6 +25,7 @@ const (
 	tumblrPushSubscriptionTTL        = 7 * 24 * time.Hour
 	tumblrPushCheckinInterval        = 24 * time.Hour
 	tumblrPushMaintenanceInterval    = time.Hour
+	tumblrPushRequestTimeout         = 30 * time.Second
 	maxStoredTumblrPushPersistentIDs = 32
 )
 
@@ -51,6 +53,12 @@ func (tc *TumblrClient) GetPushConfigs() *bridgev2.PushConfig {
 }
 
 func (tc *TumblrClient) RegisterPushNotifications(ctx context.Context, pushType bridgev2.PushType, token string) error {
+	tc.pushRegistrationLock.Lock()
+	defer tc.pushRegistrationLock.Unlock()
+	return tc.registerPushNotificationsLocked(ctx, pushType, token)
+}
+
+func (tc *TumblrClient) registerPushNotificationsLocked(ctx context.Context, pushType bridgev2.PushType, token string) error {
 	if pushType != bridgev2.PushTypeWeb {
 		return fmt.Errorf("unsupported push type: %s", pushType)
 	}
@@ -69,14 +77,24 @@ func (tc *TumblrClient) RegisterPushNotifications(ctx context.Context, pushType 
 	if err != nil {
 		return err
 	}
+	tc.pushMetadataLock.Lock()
 	keysChanged, err := meta.ensurePushKeys()
 	if err != nil {
+		tc.pushMetadataLock.Unlock()
 		return err
 	}
 	p256dh, auth, err := meta.encodedPushKeys()
 	if err != nil {
+		tc.pushMetadataLock.Unlock()
 		return err
 	}
+	if keysChanged {
+		if err = tc.saveUserLogin(ctx); err != nil {
+			tc.pushMetadataLock.Unlock()
+			return fmt.Errorf("failed to save Tumblr web push keys: %w", err)
+		}
+	}
+	tc.pushMetadataLock.Unlock()
 	registration := tumblr.NewWebPushDeviceRegistration(token, tumblr.WebPushKeys{
 		P256DH: p256dh,
 		Auth:   auth,
@@ -84,11 +102,10 @@ func (tc *TumblrClient) RegisterPushNotifications(ctx context.Context, pushType 
 	if err = client.RegisterWebPushDevice(ctx, registration); err != nil {
 		return fmt.Errorf("failed to register Tumblr web push device: %w", err)
 	}
+	tc.pushMetadataLock.Lock()
+	defer tc.pushMetadataLock.Unlock()
 	if meta.PushKeys.Token != token {
 		meta.PushKeys.Token = token
-		keysChanged = true
-	}
-	if keysChanged {
 		if err = tc.saveUserLogin(ctx); err != nil {
 			return fmt.Errorf("failed to save Tumblr web push keys: %w", err)
 		}
@@ -110,59 +127,83 @@ func (tc *TumblrClient) ConnectBackground(ctx context.Context, params *bridgev2.
 	}
 	wasLoggedIn := tc.loggedIn.Load()
 	if !wasLoggedIn {
-		tc.loggedIn.Store(true)
-		defer tc.loggedIn.Store(false)
+		tc.setLoggedIn(true)
+		defer tc.setLoggedIn(false)
 	}
 	return tc.handleWebPushPayload(ctx, params.RawData)
 }
 
-func (tc *TumblrClient) ensureSelfHostedPushReceiver(ctx context.Context) error {
+func (tc *TumblrClient) prepareSelfHostedPushReceiver(ctx context.Context) (*pushreceiver.GCMCredentials, error) {
 	if err := tc.requireLoggedIn(); err != nil {
-		return err
+		return nil, err
 	}
 	meta, err := tc.validatedLoginMetadata()
 	if err != nil {
-		return err
+		return nil, err
 	}
+	tc.pushMetadataLock.Lock()
 	keysChanged, err := meta.ensurePushKeys()
 	if err != nil {
-		return err
+		tc.pushMetadataLock.Unlock()
+		return nil, err
 	}
 	if keysChanged {
 		if err = tc.saveUserLogin(ctx); err != nil {
-			return fmt.Errorf("failed to save Tumblr web push keys: %w", err)
+			tc.pushMetadataLock.Unlock()
+			return nil, fmt.Errorf("failed to save Tumblr web push keys: %w", err)
 		}
 	}
+	tc.pushMetadataLock.Unlock()
+	return tc.ensureSelfHostedPushRegistration(ctx, meta)
+}
+
+func (tc *TumblrClient) ensureSelfHostedPushRegistration(ctx context.Context, meta *UserLoginMetadata) (*pushreceiver.GCMCredentials, error) {
+	tc.pushRegistrationLock.Lock()
+	defer tc.pushRegistrationLock.Unlock()
+
 	creds, err := tc.ensurePushReceiverCredentials(ctx, meta)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	endpoint, creds, err := tc.registerPushReceiverEndpoint(ctx, meta, creds)
+	endpoint, registeredCreds, renewed, err := tc.registerPushReceiverEndpoint(ctx, meta, creds)
+	if registeredCreds != nil {
+		creds = registeredCreds
+	}
 	if err != nil {
-		return err
+		return creds, err
 	}
-	if err = tc.RegisterPushNotifications(ctx, bridgev2.PushTypeWeb, endpoint); err != nil {
-		return err
+	if err = tc.registerPushNotificationsLocked(ctx, bridgev2.PushTypeWeb, endpoint); err != nil {
+		return creds, err
 	}
-	if err = tc.startPushReceiver(ctx, *creds); err != nil {
-		return err
+	if renewed {
+		if err = tc.markPushReceiverRegistrationComplete(ctx, meta); err != nil {
+			return creds, err
+		}
 	}
-	if log := tc.log(); log != nil {
-		log.Info().Msg("Started Tumblr web push receiver")
-	}
-	return nil
+	return creds, nil
 }
 
 func (tc *TumblrClient) ensurePushReceiverCredentials(ctx context.Context, meta *UserLoginMetadata) (*pushreceiver.GCMCredentials, error) {
+	tc.pushMetadataLock.Lock()
 	creds, err := meta.pushReceiverCredentials()
+	tc.pushMetadataLock.Unlock()
 	if err != nil {
 		return nil, err
 	} else if creds != nil {
 		return creds, nil
 	}
-	creds, err = pushreceiver.CheckIn(ctx, &pushreceiver.GCMCredentials{})
+	requestCtx, cancel := context.WithTimeout(ctx, tumblrPushRequestTimeout)
+	defer cancel()
+	creds, err = pushreceiver.CheckIn(requestCtx, &pushreceiver.GCMCredentials{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to check in Tumblr web push receiver: %w", err)
+	}
+	tc.pushMetadataLock.Lock()
+	defer tc.pushMetadataLock.Unlock()
+	if existing, existingErr := meta.pushReceiverCredentials(); existingErr != nil {
+		return nil, existingErr
+	} else if existing != nil {
+		return existing, nil
 	}
 	meta.setPushReceiverCredentials(creds)
 	meta.PushKeys.LastCheckinTS = time.Now().UnixMilli()
@@ -172,9 +213,11 @@ func (tc *TumblrClient) ensurePushReceiverCredentials(ctx context.Context, meta 
 	return creds, nil
 }
 
-func (tc *TumblrClient) registerPushReceiverEndpoint(ctx context.Context, meta *UserLoginMetadata, creds *pushreceiver.GCMCredentials) (string, *pushreceiver.GCMCredentials, error) {
+func (tc *TumblrClient) registerPushReceiverEndpoint(ctx context.Context, meta *UserLoginMetadata, creds *pushreceiver.GCMCredentials) (string, *pushreceiver.GCMCredentials, bool, error) {
+	tc.pushMetadataLock.Lock()
 	if meta == nil || meta.PushKeys == nil {
-		return "", nil, fmt.Errorf("tumblr web push keys are missing")
+		tc.pushMetadataLock.Unlock()
+		return "", nil, false, fmt.Errorf("tumblr web push keys are missing")
 	}
 	if cachedEndpoint := strings.TrimSpace(meta.PushKeys.Token); cachedEndpoint != "" &&
 		strings.TrimSpace(meta.PushKeys.FCMAppID) != "" &&
@@ -188,23 +231,28 @@ func (tc *TumblrClient) registerPushReceiverEndpoint(ctx context.Context, meta *
 				Int("fcm_app_id_len", len(meta.PushKeys.FCMAppID)).
 				Msg("Using cached Tumblr push receiver endpoint")
 		}
-		return cachedEndpoint, creds, nil
+		tc.pushMetadataLock.Unlock()
+		return cachedEndpoint, creds, false, nil
 	}
 
+	existingAppID := meta.PushKeys.FCMAppID
 	opts := &pushreceiver.GCMRegistrationOpts{
 		Expiry:     tumblrPushSubscriptionTTL,
 		InstanceID: string(tc.userLogin.ID),
 	}
-	if meta.PushKeys.FCMAppID != "" {
-		opts.AppID = meta.PushKeys.FCMAppID
+	if existingAppID != "" {
+		opts.AppID = existingAppID
 	}
+	tc.pushMetadataLock.Unlock()
 
 	var fcmCreds *pushreceiver.FCMCredentials
 	var err error
+	requestCtx, cancel := context.WithTimeout(ctx, tumblrPushRequestTimeout)
+	defer cancel()
 	for attempt := 0; attempt < 5; attempt++ {
-		fcmCreds, err = pushreceiver.RegisterGCM(ctx, tumblrWebPushVAPIDKey, *creds, opts)
+		fcmCreds, err = pushreceiver.RegisterGCM(requestCtx, tumblrWebPushVAPIDKey, *creds, opts)
 		if err != nil {
-			return "", nil, fmt.Errorf("failed to register Tumblr web push receiver with FCM: %w", err)
+			return "", nil, false, fmt.Errorf("failed to register Tumblr web push receiver with FCM: %w", err)
 		} else if strings.TrimSpace(fcmCreds.Token) != "" {
 			break
 		}
@@ -212,13 +260,13 @@ func (tc *TumblrClient) registerPushReceiverEndpoint(ctx context.Context, meta *
 			log.Warn().Msg("FCM returned an empty Tumblr web push token, retrying")
 		}
 		select {
-		case <-ctx.Done():
-			return "", nil, ctx.Err()
+		case <-requestCtx.Done():
+			return "", nil, false, requestCtx.Err()
 		case <-time.After(time.Second):
 		}
 	}
 	if fcmCreds == nil || strings.TrimSpace(fcmCreds.Token) == "" {
-		return "", nil, fmt.Errorf("FCM returned an empty Tumblr web push token")
+		return "", nil, false, fmt.Errorf("FCM returned an empty Tumblr web push token")
 	}
 
 	endpoint := "https://fcm.googleapis.com/fcm/send/" + fcmCreds.Token
@@ -228,8 +276,13 @@ func (tc *TumblrClient) registerPushReceiverEndpoint(ctx context.Context, meta *
 			Int("endpoint_len", len(endpoint)).
 			Str("fcm_app_id_hash", logIdentifierHash(fcmCreds.AppID)).
 			Int("fcm_app_id_len", len(fcmCreds.AppID)).
-			Bool("reused_fcm_app_id", meta.PushKeys.FCMAppID == fcmCreds.AppID).
+			Bool("reused_fcm_app_id", existingAppID == fcmCreds.AppID).
 			Msg("Registered Tumblr push receiver endpoint with FCM")
+	}
+	tc.pushMetadataLock.Lock()
+	defer tc.pushMetadataLock.Unlock()
+	if meta.PushKeys == nil {
+		return "", nil, false, fmt.Errorf("tumblr web push keys are missing")
 	}
 	changed := false
 	if meta.PushKeys.Token != endpoint {
@@ -244,18 +297,26 @@ func (tc *TumblrClient) registerPushReceiverEndpoint(ctx context.Context, meta *
 		meta.PushKeys.LastCheckinTS = time.Now().UnixMilli()
 		changed = true
 	}
-	now := time.Now().UnixMilli()
-	if meta.PushKeys.FCMRegisteredTS != now {
-		meta.PushKeys.FCMRegisteredTS = now
-		changed = true
-	}
-	meta.setPushReceiverCredentials(&fcmCreds.GCM)
 	if changed {
 		if err = tc.saveUserLogin(ctx); err != nil {
-			return "", nil, fmt.Errorf("failed to save Tumblr web push receiver endpoint: %w", err)
+			return "", nil, false, fmt.Errorf("failed to save Tumblr web push receiver endpoint: %w", err)
 		}
 	}
-	return endpoint, &fcmCreds.GCM, nil
+	return endpoint, &fcmCreds.GCM, true, nil
+}
+
+func (tc *TumblrClient) markPushReceiverRegistrationComplete(ctx context.Context, meta *UserLoginMetadata) error {
+	tc.pushMetadataLock.Lock()
+	defer tc.pushMetadataLock.Unlock()
+
+	if meta == nil || meta.PushKeys == nil {
+		return fmt.Errorf("tumblr web push keys are missing")
+	}
+	meta.PushKeys.FCMRegisteredTS = time.Now().UnixMilli()
+	if err := tc.saveUserLogin(ctx); err != nil {
+		return fmt.Errorf("failed to save Tumblr web push receiver registration time: %w", err)
+	}
+	return nil
 }
 
 func tumblrPushReceiverRegistrationDue(keys *PushKeys) bool {
@@ -263,7 +324,7 @@ func tumblrPushReceiverRegistrationDue(keys *PushKeys) bool {
 		return true
 	}
 	registeredAt := time.UnixMilli(keys.FCMRegisteredTS)
-	return time.Until(registeredAt.Add(tumblrPushSubscriptionTTL)) <= tumblrPushSubscriptionTTL/2
+	return !time.Now().Before(registeredAt.Add(tumblrPushSubscriptionTTL / 2))
 }
 
 func (tc *TumblrClient) startPushReceiver(ctx context.Context, creds pushreceiver.GCMCredentials) error {
@@ -271,10 +332,12 @@ func (tc *TumblrClient) startPushReceiver(ctx context.Context, creds pushreceive
 	if err != nil {
 		return err
 	}
+	tc.pushMetadataLock.Lock()
 	persistentIDs := []string(nil)
 	if meta.PushKeys != nil {
 		persistentIDs = append(persistentIDs, meta.PushKeys.PersistentIDs...)
 	}
+	tc.pushMetadataLock.Unlock()
 
 	tc.pushLock.Lock()
 	if tc.pushCancel != nil {
@@ -312,14 +375,14 @@ func (tc *TumblrClient) startPushReceiver(ctx context.Context, creds pushreceive
 
 func (tc *TumblrClient) stopPushReceiver() {
 	tc.pushLock.Lock()
+	defer tc.pushLock.Unlock()
 	cancel := tc.pushCancel
-	tc.pushCancel = nil
-	tc.pushLock.Unlock()
 	if cancel == nil {
 		return
 	}
 	cancel()
 	tc.pushWG.Wait()
+	tc.pushCancel = nil
 }
 
 func (tc *TumblrClient) pushListenLoop(ctx context.Context, client *pushreceiver.MCSClient) {
@@ -389,6 +452,8 @@ func (tc *TumblrClient) pushMaintenanceLoop(ctx context.Context) {
 	defer tc.pushWG.Done()
 	ticker := time.NewTicker(tumblrPushMaintenanceInterval)
 	defer ticker.Stop()
+	registrationTimer := time.NewTimer(tc.nextPushReceiverRegistrationDelay())
+	defer registrationTimer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -399,30 +464,155 @@ func (tc *TumblrClient) pushMaintenanceLoop(ctx context.Context) {
 					log.Warn().Err(err).Msg("Failed to refresh Tumblr web push receiver checkin")
 				}
 			}
+		case <-registrationTimer.C:
+			nextDelay := tumblrPushMaintenanceInterval
+			if err := tc.refreshPushReceiverRegistration(ctx); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				if tc.pushReceiverRegistrationExpired() {
+					tc.markPushRegistrationUnavailable(err)
+				}
+				if log := tc.log(); log != nil {
+					log.Warn().Err(err).Msg("Failed to renew Tumblr web push receiver registration")
+				}
+			} else {
+				nextDelay = tc.nextPushReceiverRegistrationDelay()
+			}
+			registrationTimer.Reset(nextDelay)
 		}
 	}
 }
 
-func (tc *TumblrClient) refreshPushReceiverCheckin(ctx context.Context) error {
+func (tc *TumblrClient) nextPushReceiverRegistrationDelay() time.Duration {
+	meta, err := tc.validatedLoginMetadata()
+	if err != nil {
+		return 0
+	}
+	tc.pushMetadataLock.Lock()
+	defer tc.pushMetadataLock.Unlock()
+	if meta.PushKeys == nil || meta.PushKeys.FCMRegisteredTS <= 0 {
+		return 0
+	}
+	renewAt := time.UnixMilli(meta.PushKeys.FCMRegisteredTS).Add(tumblrPushSubscriptionTTL / 2)
+	if delay := time.Until(renewAt); delay > 0 {
+		return delay
+	}
+	return 0
+}
+
+func (tc *TumblrClient) refreshPushReceiverRegistration(ctx context.Context) error {
+	if err := tc.requireLoggedIn(); err != nil {
+		return err
+	}
+	tc.pushRegistrationLock.Lock()
+	defer tc.pushRegistrationLock.Unlock()
+
 	meta, err := tc.validatedLoginMetadata()
 	if err != nil {
 		return err
-	} else if meta.PushKeys == nil || meta.PushKeys.LastCheckinTS == 0 {
+	}
+	tc.pushMetadataLock.Lock()
+	registrationDue := tumblrPushReceiverRegistrationDue(meta.PushKeys)
+	tc.pushMetadataLock.Unlock()
+	if !registrationDue {
+		tc.markPushRegistrationRecovered()
 		return nil
 	}
-	lastCheckin := time.UnixMilli(meta.PushKeys.LastCheckinTS)
+	creds, err := tc.ensurePushReceiverCredentials(ctx, meta)
+	if err != nil {
+		return err
+	}
+	endpoint, _, renewed, err := tc.registerPushReceiverEndpoint(ctx, meta, creds)
+	if err != nil {
+		return err
+	} else if !renewed {
+		return nil
+	}
+	if err = tc.registerPushNotificationsLocked(ctx, bridgev2.PushTypeWeb, endpoint); err != nil {
+		return tc.handleRemoteError(err)
+	}
+	if err = tc.markPushReceiverRegistrationComplete(ctx, meta); err != nil {
+		return err
+	}
+	if log := tc.log(); log != nil {
+		log.Info().Msg("Renewed Tumblr web push receiver registration")
+	}
+	tc.markPushRegistrationRecovered()
+	return nil
+}
+
+func (tc *TumblrClient) markPushRegistrationRecovered() {
+	tc.stateLock.Lock()
+	defer tc.stateLock.Unlock()
+	if !tc.loggedIn.Load() {
+		return
+	}
+	if tc.pushRegistrationDown.Swap(false) {
+		tc.sendBridgeState(status.BridgeState{StateEvent: status.StateConnected})
+	}
+}
+
+func (tc *TumblrClient) markPushRegistrationUnavailable(err error) {
+	tc.stateLock.Lock()
+	defer tc.stateLock.Unlock()
+	if !tc.loggedIn.Load() {
+		return
+	}
+	if tc.pushRegistrationDown.CompareAndSwap(false, true) {
+		tc.sendBridgeState(tumblrPushUnavailableState(err))
+	}
+}
+
+func (tc *TumblrClient) pushReceiverRegistrationExpired() bool {
+	meta, err := tc.validatedLoginMetadata()
+	if err != nil {
+		return true
+	}
+	tc.pushMetadataLock.Lock()
+	defer tc.pushMetadataLock.Unlock()
+	if meta.PushKeys == nil || meta.PushKeys.FCMRegisteredTS <= 0 {
+		return true
+	}
+	expiresAt := time.UnixMilli(meta.PushKeys.FCMRegisteredTS).Add(tumblrPushSubscriptionTTL)
+	return !time.Now().Before(expiresAt)
+}
+
+func (tc *TumblrClient) refreshPushReceiverCheckin(ctx context.Context) error {
+	tc.pushMetadataLock.Lock()
+	meta, err := tc.validatedLoginMetadata()
+	if err != nil {
+		tc.pushMetadataLock.Unlock()
+		return err
+	} else if meta.PushKeys == nil || meta.PushKeys.LastCheckinTS == 0 {
+		tc.pushMetadataLock.Unlock()
+		return nil
+	}
+	lastCheckinTS := meta.PushKeys.LastCheckinTS
+	lastCheckin := time.UnixMilli(lastCheckinTS)
 	if time.Since(lastCheckin) <= tumblrPushCheckinInterval {
+		tc.pushMetadataLock.Unlock()
 		return nil
 	}
 	creds, err := meta.pushReceiverCredentials()
+	tc.pushMetadataLock.Unlock()
 	if err != nil {
 		return err
 	} else if creds == nil {
 		return nil
 	}
-	updated, err := pushreceiver.CheckIn(ctx, creds)
+	requestCtx, cancel := context.WithTimeout(ctx, tumblrPushRequestTimeout)
+	defer cancel()
+	updated, err := pushreceiver.CheckIn(requestCtx, creds)
 	if err != nil {
 		return fmt.Errorf("failed to check in Tumblr web push receiver: %w", err)
+	}
+	tc.pushMetadataLock.Lock()
+	defer tc.pushMetadataLock.Unlock()
+	if meta.PushKeys == nil {
+		return nil
+	} else if meta.PushKeys.LastCheckinTS > lastCheckinTS {
+		return nil
 	}
 	meta.setPushReceiverCredentials(updated)
 	meta.PushKeys.LastCheckinTS = time.Now().UnixMilli()
@@ -471,6 +661,9 @@ func (tc *TumblrClient) savePushPersistentID(ctx context.Context, persistentID s
 	if persistentID == "" {
 		return nil
 	}
+	tc.pushMetadataLock.Lock()
+	defer tc.pushMetadataLock.Unlock()
+
 	meta, err := tc.validatedLoginMetadata()
 	if err != nil || meta.PushKeys == nil {
 		return err
@@ -488,6 +681,9 @@ func (tc *TumblrClient) savePushPersistentID(ctx context.Context, persistentID s
 }
 
 func (tc *TumblrClient) clearPushPersistentIDs(ctx context.Context) error {
+	tc.pushMetadataLock.Lock()
+	defer tc.pushMetadataLock.Unlock()
+
 	meta, err := tc.validatedLoginMetadata()
 	if err != nil || meta.PushKeys == nil || len(meta.PushKeys.PersistentIDs) == 0 {
 		return err
@@ -497,6 +693,11 @@ func (tc *TumblrClient) clearPushPersistentIDs(ctx context.Context) error {
 }
 
 func (tc *TumblrClient) unregisterTumblrWebPush(ctx context.Context) {
+	tc.pushRegistrationLock.Lock()
+	defer tc.pushRegistrationLock.Unlock()
+	tc.pushMetadataLock.Lock()
+	defer tc.pushMetadataLock.Unlock()
+
 	meta, err := tc.validatedLoginMetadata()
 	if err != nil || meta.PushKeys == nil || strings.TrimSpace(meta.PushKeys.Token) == "" {
 		return
@@ -579,13 +780,18 @@ func (tc *TumblrClient) decodeWebPushEnvelope(envelope webPushPayload) ([]byte, 
 	if err != nil {
 		return nil, err
 	}
+	tc.pushMetadataLock.Lock()
 	privateKey, err := meta.pushPrivateKey()
 	if err != nil {
+		tc.pushMetadataLock.Unlock()
 		return nil, err
 	}
 	if meta.PushKeys == nil || len(meta.PushKeys.Auth) != 16 {
+		tc.pushMetadataLock.Unlock()
 		return nil, fmt.Errorf("tumblr web push auth secret is missing or invalid")
 	}
+	authSecret := append([]byte(nil), meta.PushKeys.Auth...)
+	tc.pushMetadataLock.Unlock()
 	encoding := strings.TrimSpace(envelope.ContentEncoding)
 	if encoding == "" {
 		encoding = string(rfc8291.EncodingAes128gcm)
@@ -595,7 +801,7 @@ func (tc *TumblrClient) decodeWebPushEnvelope(envelope webPushPayload) ([]byte, 
 		rfc8291.Encoding(encoding),
 		envelope.Encryption,
 		envelope.CryptoKey,
-		meta.PushKeys.Auth,
+		authSecret,
 		privateKey,
 	)
 	if err != nil {
