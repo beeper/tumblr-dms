@@ -4,6 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"math/bits"
+	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -234,9 +237,13 @@ func (r *ConversationMessagesResponse) UnmarshalJSON(data []byte) error {
 			if r.Links.Next == nil && r.Conversation.Messages.Links.Next != nil {
 				r.Links = r.Conversation.Messages.Links
 			}
-			r.Messages = deriveMissingMessageIDs(r.Conversation.ID, r.Messages)
+			r.Messages = deriveMissingMessageIDs(r.Conversation.ID, r.Conversation.Participants, r.Messages)
 			if len(r.Conversation.Messages.Data) > 0 {
-				r.Conversation.Messages.Data = deriveMissingMessageIDs(r.Conversation.ID, r.Conversation.Messages.Data)
+				r.Conversation.Messages.Data = deriveMissingMessageIDs(
+					r.Conversation.ID,
+					r.Conversation.Participants,
+					r.Conversation.Messages.Data,
+				)
 			}
 		}
 		return nil
@@ -288,18 +295,31 @@ func (l ResponseLink) QueryParam(name string) string {
 	return strings.TrimSpace(l.QueryParams[name])
 }
 
-func (r ConversationListResponse) NextBefore() string {
-	if r.Links.Next == nil {
-		return ""
-	}
-	return r.Links.Next.QueryParam("before")
+func (r ConversationListResponse) NextBefore() (string, error) {
+	return nextBeforeCursor(r.Links.Next)
 }
 
-func (r ConversationMessagesResponse) NextBefore() string {
-	if r.Links.Next == nil {
-		return ""
+func (r ConversationMessagesResponse) NextBefore() (string, error) {
+	return nextBeforeCursor(r.Links.Next)
+}
+
+func nextBeforeCursor(next *ResponseLink) (string, error) {
+	if next == nil {
+		return "", nil
 	}
-	return r.Links.Next.QueryParam("before")
+	if before := next.QueryParam("before"); before != "" {
+		return before, nil
+	}
+	if href := strings.TrimSpace(next.Href); href != "" {
+		parsed, err := url.Parse(href)
+		if err != nil {
+			return "", fmt.Errorf("invalid Tumblr next-page URL: %w", err)
+		}
+		if before := strings.TrimSpace(parsed.Query().Get("before")); before != "" {
+			return before, nil
+		}
+	}
+	return "", fmt.Errorf("tumblr next-page link is missing its before cursor")
 }
 
 func linksFromWrapped(links, underscore *ResponseLinks) ResponseLinks {
@@ -327,14 +347,18 @@ func decodeQueryParams(data json.RawMessage) map[string]string {
 	}
 	out := make(map[string]string, len(raw))
 	for key, value := range raw {
-		var text string
-		if err := json.Unmarshal(value, &text); err == nil {
+		if text := decodeFlexibleString(value); text != "" {
 			out[key] = text
 			continue
 		}
-		var list []string
-		if err := json.Unmarshal(value, &list); err == nil && len(list) > 0 {
-			out[key] = list[0]
+		var list []json.RawMessage
+		if err := json.Unmarshal(value, &list); err == nil {
+			for _, item := range list {
+				if text := decodeFlexibleString(item); text != "" {
+					out[key] = text
+					break
+				}
+			}
 		}
 	}
 	return out
@@ -380,7 +404,7 @@ func (c *Conversation) UnmarshalJSON(data []byte) error {
 	} else if ok {
 		c.LastModifiedTimestamp = value
 	}
-	c.Messages.Data = deriveMissingMessageIDs(c.ID, c.Messages.Data)
+	c.Messages.Data = deriveMissingMessageIDs(c.ID, c.Participants, c.Messages.Data)
 	return nil
 }
 
@@ -460,7 +484,7 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 	}
 	m.Content = raw.Content
 	if m.Content == nil && strings.EqualFold(m.Type, MessageTypeText) && strings.TrimSpace(raw.Message) != "" {
-		m.Content = &MessageContent{Text: strings.TrimSpace(raw.Message)}
+		m.Content = &MessageContent{Text: raw.Message}
 	}
 	m.Post = raw.Post
 	m.Images = raw.Images
@@ -556,18 +580,18 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func deriveMissingMessageIDs(conversationID string, messages []Message) []Message {
+func deriveMissingMessageIDs(conversationID string, participants []Blog, messages []Message) []Message {
 	for i := range messages {
 		if strings.TrimSpace(messages[i].ID) == "" {
-			messages[i].ID = syntheticMessageID(conversationID, messages[i])
+			messages[i].ID = syntheticMessageID(conversationID, participants, messages[i])
 		}
 	}
 	return messages
 }
 
-func syntheticMessageID(conversationID string, message Message) string {
+func syntheticMessageID(conversationID string, participants []Blog, message Message) string {
 	conversationID = strings.TrimSpace(conversationID)
-	participant := messageParticipantID(message.Participant)
+	participant := messageParticipantID(message.Participant, participants)
 	content := messageContentID(message)
 	if conversationID == "" || participant == "" || strings.TrimSpace(message.Type) == "" || message.Timestamp <= 0 || content == "" {
 		return ""
@@ -575,21 +599,39 @@ func syntheticMessageID(conversationID string, message Message) string {
 	hash := sha256.Sum256([]byte(strings.Join([]string{
 		conversationID,
 		participant,
-		strconv.FormatInt(message.Timestamp, 10),
-		strings.TrimSpace(message.Type),
+		strconv.FormatInt(canonicalMessageTimestamp(message.Timestamp), 10),
+		strings.ToUpper(strings.TrimSpace(message.Type)),
 		content,
 	}, "\x00")))
 	return "synthetic-" + fmt.Sprintf("%x", hash[:16])
 }
 
-func messageParticipantID(participant *Blog) string {
+func canonicalMessageTimestamp(timestamp int64) int64 {
+	if timestamp > 0 && timestamp <= 1_000_000_000_000 {
+		return timestamp * 1_000
+	}
+	return timestamp
+}
+
+func messageParticipantID(participant *Blog, participants []Blog) string {
 	if participant == nil {
 		return ""
 	}
 	if participant.UUID != "" {
 		return strings.TrimSpace(participant.UUID)
 	}
-	return strings.TrimSpace(participant.Name)
+	rawName := strings.TrimSpace(participant.Name)
+	name := NormalizeBlogName(rawName)
+	if name == "" {
+		return rawName
+	}
+	for _, candidate := range participants {
+		candidateUUID := strings.TrimSpace(candidate.UUID)
+		if candidateUUID != "" && (strings.EqualFold(NormalizeBlogName(candidate.Name), name) || strings.EqualFold(candidateUUID, rawName)) {
+			return candidateUUID
+		}
+	}
+	return name
 }
 
 func messageContentID(message Message) string {
@@ -599,14 +641,52 @@ func messageContentID(message Message) string {
 	if message.Post != nil && strings.TrimSpace(message.Post.ID) != "" {
 		return "post:" + strings.TrimSpace(message.Post.ID)
 	}
-	if image := message.BestImage(); image != nil && strings.TrimSpace(image.URL) != "" {
-		return "image:" + strings.TrimSpace(image.URL)
+	if len(message.Images) > 0 {
+		images := make([]string, 0, len(message.Images))
+		for _, image := range message.Images {
+			imageURL := canonicalMessageImageURL(image)
+			if imageURL == "" {
+				// Do not build an identity from only part of a multi-image
+				// message. The raw payload fallback below is safer than
+				// collapsing two messages that differ in the omitted image.
+				images = nil
+				break
+			}
+			images = append(images, imageURL)
+		}
+		if len(images) > 0 {
+			sort.Strings(images)
+			unique := images[:0]
+			for _, imageURL := range images {
+				if len(unique) == 0 || unique[len(unique)-1] != imageURL {
+					unique = append(unique, imageURL)
+				}
+			}
+			return "images:" + strings.Join(unique, "\x00")
+		}
 	}
 	if len(message.Raw) > 0 {
 		hash := sha256.Sum256(message.Raw)
 		return "raw:" + fmt.Sprintf("%x", hash[:16])
 	}
 	return ""
+}
+
+func canonicalMessageImageURL(image MessageImage) string {
+	if original, err := normalizeDownloadURL(strings.TrimSpace(image.OriginalSize.URL)); err == nil {
+		return original
+	}
+	altURLs := make([]string, 0, len(image.AltSizes))
+	for _, alt := range image.AltSizes {
+		if altURL, err := normalizeDownloadURL(strings.TrimSpace(alt.URL)); err == nil {
+			altURLs = append(altURLs, altURL)
+		}
+	}
+	if len(altURLs) == 0 {
+		return ""
+	}
+	sort.Strings(altURLs)
+	return altURLs[0]
 }
 
 type MessageContent struct {
@@ -618,42 +698,85 @@ type MessageImage struct {
 	AltSizes     []ImageAsset `json:"altSizes"`
 }
 
+func (image MessageImage) Candidates() []ImageAsset {
+	altSizes := append([]ImageAsset(nil), image.AltSizes...)
+	sort.SliceStable(altSizes, func(i, j int) bool {
+		iHigh, iLow := imageAssetArea(altSizes[i])
+		jHigh, jLow := imageAssetArea(altSizes[j])
+		if iHigh != jHigh {
+			return iHigh > jHigh
+		}
+		return iLow > jLow
+	})
+
+	candidates := make([]ImageAsset, 0, 1+len(altSizes))
+	seenURLs := make(map[string]struct{}, 1+len(altSizes))
+	appendCandidate := func(asset ImageAsset) {
+		asset.URL = strings.TrimSpace(asset.URL)
+		if asset.URL == "" {
+			return
+		}
+		if _, seen := seenURLs[asset.URL]; seen {
+			return
+		}
+		seenURLs[asset.URL] = struct{}{}
+		candidates = append(candidates, asset)
+	}
+	appendCandidate(image.OriginalSize)
+	for _, asset := range altSizes {
+		appendCandidate(asset)
+	}
+	return candidates
+}
+
+func imageAssetArea(asset ImageAsset) (high, low uint64) {
+	if asset.Width <= 0 || asset.Height <= 0 {
+		return 0, 0
+	}
+	return bits.Mul64(uint64(asset.Width), uint64(asset.Height))
+}
+
 func (m Message) BestImage() *ImageAsset {
 	for _, image := range m.Images {
-		if strings.TrimSpace(image.OriginalSize.URL) != "" {
-			return &image.OriginalSize
-		}
-		for _, alt := range image.AltSizes {
-			if strings.TrimSpace(alt.URL) != "" {
-				return &alt
-			}
+		if candidates := image.Candidates(); len(candidates) > 0 {
+			return &candidates[0]
 		}
 	}
 	return nil
 }
 
 type PostRef struct {
-	ID      string      `json:"id"`
-	Summary string      `json:"summary"`
-	State   string      `json:"state,omitempty"`
-	IsNSFW  bool        `json:"isNsfw,omitempty"`
-	Type    string      `json:"type,omitempty"`
-	URL     string      `json:"url,omitempty"`
-	PostURL string      `json:"postUrl,omitempty"`
-	Blog    PostRefBlog `json:"blog,omitempty"`
+	ID               string                 `json:"id"`
+	Summary          string                 `json:"summary"`
+	State            string                 `json:"state,omitempty"`
+	IsNSFW           bool                   `json:"isNsfw,omitempty"`
+	ObjectType       string                 `json:"objectType,omitempty"`
+	Type             string                 `json:"type,omitempty"`
+	Classification   string                 `json:"classification,omitempty"`
+	CanSendInMessage bool                   `json:"canSendInMessage,omitempty"`
+	URL              string                 `json:"url,omitempty"`
+	PostURL          string                 `json:"postUrl,omitempty"`
+	Blog             PostRefBlog            `json:"blog,omitempty"`
+	Content          []PostRefContent       `json:"content,omitempty"`
+	CommunityLabels  PostRefCommunityLabels `json:"communityLabels,omitempty"`
 }
 
 func (p *PostRef) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		ID           json.RawMessage `json:"id"`
-		Summary      string          `json:"summary"`
-		State        string          `json:"state"`
-		IsNSFW       bool            `json:"isNsfw"`
-		Type         string          `json:"type"`
-		URL          string          `json:"url"`
-		PostURL      string          `json:"postUrl"`
-		PostURLSnake string          `json:"post_url"`
-		Blog         json.RawMessage `json:"blog"`
+		ID               json.RawMessage        `json:"id"`
+		Summary          string                 `json:"summary"`
+		State            string                 `json:"state"`
+		IsNSFW           bool                   `json:"isNsfw"`
+		ObjectType       string                 `json:"objectType"`
+		Type             string                 `json:"type"`
+		Classification   string                 `json:"classification"`
+		CanSendInMessage bool                   `json:"canSendInMessage"`
+		URL              string                 `json:"url"`
+		PostURL          string                 `json:"postUrl"`
+		PostURLSnake     string                 `json:"post_url"`
+		Blog             json.RawMessage        `json:"blog"`
+		Content          []PostRefContent       `json:"content"`
+		CommunityLabels  PostRefCommunityLabels `json:"communityLabels"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -662,9 +785,14 @@ func (p *PostRef) UnmarshalJSON(data []byte) error {
 	p.Summary = raw.Summary
 	p.State = strings.TrimSpace(raw.State)
 	p.IsNSFW = raw.IsNSFW
+	p.ObjectType = strings.TrimSpace(raw.ObjectType)
 	p.Type = strings.TrimSpace(raw.Type)
+	p.Classification = strings.TrimSpace(raw.Classification)
+	p.CanSendInMessage = raw.CanSendInMessage
 	p.URL = strings.TrimSpace(raw.URL)
 	p.PostURL = strings.TrimSpace(firstNonEmpty(raw.PostURL, raw.PostURLSnake))
+	p.Content = raw.Content
+	p.CommunityLabels = raw.CommunityLabels
 	p.Blog = PostRefBlog{}
 	if len(raw.Blog) > 0 && string(raw.Blog) != "null" {
 		blog, err := decodePostRefBlog(raw.Blog)
@@ -684,11 +812,100 @@ func (p PostRef) IsUnavailable() bool {
 	return strings.EqualFold(strings.TrimSpace(p.State), "disabled") || p.IsNSFW
 }
 
+const maxPostRefGIFCandidates = 16
+
+type PostRefContent struct {
+	Type  string         `json:"type"`
+	Text  string         `json:"text,omitempty"`
+	Media []PostRefMedia `json:"media"`
+}
+
+type PostRefMedia struct {
+	URL     string      `json:"url"`
+	Type    string      `json:"type"`
+	Width   int         `json:"width"`
+	Height  int         `json:"height"`
+	Cropped bool        `json:"cropped,omitempty"`
+	Poster  *ImageAsset `json:"poster,omitempty"`
+}
+
+type PostRefCommunityLabels struct {
+	HasCommunityLabel bool `json:"hasCommunityLabel"`
+}
+
+// GIFPreviewCandidates returns only Tumblr-hosted, uncropped animation
+// variants from a post reference whose complete payload proves it contains one
+// GIF and, optionally, the same caption Tumblr supplied in the post summary.
+// Anything ambiguous stays a normal Tumblr post link.
+func (p *PostRef) GIFPreviewCandidates() []ImageAsset {
+	if p == nil || p.IsUnavailable() || p.Blog.IsAdult || p.Blog.ShouldBlur ||
+		p.CommunityLabels.HasCommunityLabel || !p.CanSendInMessage ||
+		!strings.EqualFold(p.ObjectType, "post") || !strings.EqualFold(p.Type, "blocks") ||
+		!strings.EqualFold(p.State, "published") ||
+		!strings.EqualFold(p.Classification, "clean") ||
+		len(p.Content) == 0 || len(p.Content) > 2 {
+		return nil
+	}
+
+	imageBlock := p.Content[0]
+	if !strings.EqualFold(strings.TrimSpace(imageBlock.Type), "image") || strings.TrimSpace(imageBlock.Text) != "" {
+		return nil
+	}
+	if len(p.Content) == 2 {
+		captionBlock := p.Content[1]
+		if !strings.EqualFold(strings.TrimSpace(captionBlock.Type), "text") || len(captionBlock.Media) != 0 ||
+			strings.TrimSpace(captionBlock.Text) == "" || strings.TrimSpace(captionBlock.Text) != strings.TrimSpace(p.Summary) {
+			return nil
+		}
+	}
+
+	media := imageBlock.Media
+	if len(media) == 0 || len(media) > maxPostRefGIFCandidates {
+		return nil
+	}
+	candidates := make([]ImageAsset, 0, len(media))
+	seenURLs := make(map[string]struct{}, len(media))
+	for _, item := range media {
+		if !strings.EqualFold(strings.TrimSpace(item.Type), "image/gif") {
+			return nil
+		}
+		if item.Cropped || item.Width <= 0 || item.Height <= 0 || item.Poster == nil {
+			continue
+		}
+		itemURL := strings.TrimSpace(item.URL)
+		posterURL := strings.TrimSpace(item.Poster.URL)
+		if itemURL == "" || posterURL == "" || itemURL == posterURL ||
+			!IsDownloadURLAllowed(itemURL) || !IsDownloadURLAllowed(posterURL) {
+			continue
+		}
+		if _, seen := seenURLs[itemURL]; seen {
+			continue
+		}
+		seenURLs[itemURL] = struct{}{}
+		candidates = append(candidates, ImageAsset{
+			URL:    itemURL,
+			Width:  item.Width,
+			Height: item.Height,
+		})
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		iHigh, iLow := imageAssetArea(candidates[i])
+		jHigh, jLow := imageAssetArea(candidates[j])
+		if iHigh != jHigh {
+			return iHigh > jHigh
+		}
+		return iLow > jLow
+	})
+	return candidates
+}
+
 type PostRefBlog struct {
 	UUID        string `json:"uuid,omitempty"`
 	Name        string `json:"name,omitempty"`
 	URL         string `json:"url,omitempty"`
 	BlogViewURL string `json:"blogViewUrl,omitempty"`
+	IsAdult     bool   `json:"isAdult,omitempty"`
+	ShouldBlur  bool   `json:"shouldBlur,omitempty"`
 }
 
 func (b *PostRefBlog) UnmarshalJSON(data []byte) error {
@@ -747,26 +964,15 @@ type SendMessageRequest struct {
 }
 
 type SendMessageResponse struct {
-	Message      *Message      `json:"message"`
 	Conversation *Conversation `json:"conversation"`
 }
 
 func (r *SendMessageResponse) UnmarshalJSON(data []byte) error {
 	var wrapped struct {
-		Message      *Message      `json:"message"`
 		Conversation *Conversation `json:"conversation"`
 	}
-	if err := json.Unmarshal(data, &wrapped); err == nil && (wrapped.Message != nil || wrapped.Conversation != nil) {
-		r.Message = wrapped.Message
+	if err := json.Unmarshal(data, &wrapped); err == nil && wrapped.Conversation != nil {
 		r.Conversation = wrapped.Conversation
-		if r.Message != nil && strings.TrimSpace(r.Message.ID) == "" && r.Conversation != nil {
-			messages := deriveMissingMessageIDs(r.Conversation.ID, []Message{*r.Message})
-			r.Message = &messages[0]
-		}
-		if r.Message == nil && r.Conversation != nil && len(r.Conversation.Messages.Data) > 0 {
-			message := r.Conversation.Messages.Data[len(r.Conversation.Messages.Data)-1]
-			r.Message = &message
-		}
 		return nil
 	}
 	var conversation Conversation
@@ -774,10 +980,5 @@ func (r *SendMessageResponse) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	r.Conversation = &conversation
-	r.Message = nil
-	if len(conversation.Messages.Data) > 0 {
-		message := conversation.Messages.Data[len(conversation.Messages.Data)-1]
-		r.Message = &message
-	}
 	return nil
 }

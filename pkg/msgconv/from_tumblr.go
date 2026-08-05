@@ -34,7 +34,9 @@ func (m *MessageMetadata) CopyFrom(other any) {
 func CanUseImageMedia(message tumblr.Message) bool {
 	switch message.Type {
 	case tumblr.MessageTypeImage, tumblr.MessageTypeSticker:
-		return message.BestImage() != nil
+		return len(message.Images) > 0
+	case tumblr.MessageTypePostRef:
+		return len(message.Post.GIFPreviewCandidates()) > 0
 	default:
 		return false
 	}
@@ -139,6 +141,12 @@ func noticePostBody(post *tumblr.PostRef) string {
 	default:
 		return "Tumblr post"
 	}
+}
+
+// PostRefMediaCaption preserves the text and link from a GIF-only post
+// reference when the connector renders its animation as Matrix media.
+func PostRefMediaCaption(post *tumblr.PostRef) string {
+	return cleanMessageBody(noticePostBody(post))
 }
 
 func noticeMessageType(messageType string) string {

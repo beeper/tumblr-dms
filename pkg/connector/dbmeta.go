@@ -41,17 +41,26 @@ type PortalMetadata struct {
 type MessageMetadata = msgconv.MessageMetadata
 
 type UserLoginMetadata struct {
-	CookieHeader     string    `json:"cookie_header"`
-	APIToken         string    `json:"api_token,omitempty"`
-	CSRFToken        string    `json:"csrf_token,omitempty"`
-	APIVersion       string    `json:"api_version,omitempty"`
-	UserName         string    `json:"user_name,omitempty"`
-	SelectedBlogName string    `json:"selected_blog_name,omitempty"`
-	SelectedBlogUUID string    `json:"selected_blog_uuid,omitempty"`
-	PushKeys         *PushKeys `json:"push_keys,omitempty"`
+	SessionCookies   map[string]string `json:"session_cookies,omitempty"`
+	APIToken         string            `json:"api_token,omitempty"`
+	CSRFToken        string            `json:"csrf_token,omitempty"`
+	APIVersion       string            `json:"api_version,omitempty"`
+	UserName         string            `json:"user_name,omitempty"`
+	SelectedBlogName string            `json:"selected_blog_name,omitempty"`
+	SelectedBlogUUID string            `json:"selected_blog_uuid,omitempty"`
+	PushKeys         *PushKeys         `json:"push_keys,omitempty"`
 }
 
 type PushKeys struct {
+	Active   *PushRegistration   `json:"active,omitempty"`
+	Pending  *PushRegistration   `json:"pending,omitempty"`
+	Retiring []*PushRegistration `json:"retiring,omitempty"`
+	P256DH   []byte              `json:"p256dh,omitempty"`
+	Auth     []byte              `json:"auth,omitempty"`
+	Private  []byte              `json:"private,omitempty"`
+}
+
+type PushRegistration struct {
 	Token           string   `json:"token,omitempty"`
 	FCMAppID        string   `json:"fcm_app_id,omitempty"`
 	AndroidID       string   `json:"android_id,omitempty"`
@@ -59,9 +68,47 @@ type PushKeys struct {
 	LastCheckinTS   int64    `json:"last_checkin_ts,omitempty"`
 	FCMRegisteredTS int64    `json:"fcm_registered_ts,omitempty"`
 	PersistentIDs   []string `json:"persistent_ids,omitempty"`
-	P256DH          []byte   `json:"p256dh,omitempty"`
-	Auth            []byte   `json:"auth,omitempty"`
-	Private         []byte   `json:"private,omitempty"`
+}
+
+func (m *UserLoginMetadata) clone() *UserLoginMetadata {
+	if m == nil {
+		return nil
+	}
+	cloned := *m
+	cloned.SessionCookies = make(map[string]string, len(m.SessionCookies))
+	for name, value := range m.SessionCookies {
+		cloned.SessionCookies[name] = value
+	}
+	cloned.PushKeys = m.PushKeys.clone()
+	return &cloned
+}
+
+func (r *PushRegistration) clone() *PushRegistration {
+	if r == nil {
+		return nil
+	}
+	cloned := *r
+	cloned.PersistentIDs = append([]string(nil), r.PersistentIDs...)
+	return &cloned
+}
+
+func (keys *PushKeys) clone() *PushKeys {
+	if keys == nil {
+		return nil
+	}
+	cloned := *keys
+	cloned.Active = keys.Active.clone()
+	cloned.Pending = keys.Pending.clone()
+	cloned.Retiring = make([]*PushRegistration, 0, len(keys.Retiring))
+	for _, registration := range keys.Retiring {
+		if registration != nil {
+			cloned.Retiring = append(cloned.Retiring, registration.clone())
+		}
+	}
+	cloned.P256DH = append([]byte(nil), keys.P256DH...)
+	cloned.Auth = append([]byte(nil), keys.Auth...)
+	cloned.Private = append([]byte(nil), keys.Private...)
+	return &cloned
 }
 
 func (m *UserLoginMetadata) ensurePushKeys() (bool, error) {
@@ -79,46 +126,23 @@ func (m *UserLoginMetadata) ensurePushKeys() (bool, error) {
 	if _, err = rand.Read(authSecret); err != nil {
 		return false, fmt.Errorf("failed to generate web push auth secret: %w", err)
 	}
-	token := ""
-	fcmAppID := ""
-	androidID := ""
-	securityToken := ""
-	lastCheckinTS := int64(0)
-	fcmRegisteredTS := int64(0)
-	persistentIDs := []string(nil)
-	if m.PushKeys != nil {
-		token = m.PushKeys.Token
-		fcmAppID = m.PushKeys.FCMAppID
-		androidID = m.PushKeys.AndroidID
-		securityToken = m.PushKeys.SecurityToken
-		lastCheckinTS = m.PushKeys.LastCheckinTS
-		fcmRegisteredTS = m.PushKeys.FCMRegisteredTS
-		persistentIDs = append(persistentIDs, m.PushKeys.PersistentIDs...)
-	}
 	m.PushKeys = &PushKeys{
-		Token:           token,
-		FCMAppID:        fcmAppID,
-		AndroidID:       androidID,
-		SecurityToken:   securityToken,
-		LastCheckinTS:   lastCheckinTS,
-		FCMRegisteredTS: fcmRegisteredTS,
-		PersistentIDs:   persistentIDs,
-		P256DH:          privateKey.PublicKey().Bytes(),
-		Auth:            authSecret,
-		Private:         privateKey.Bytes(),
+		P256DH:  privateKey.PublicKey().Bytes(),
+		Auth:    authSecret,
+		Private: privateKey.Bytes(),
 	}
 	return true, nil
 }
 
-func (m *UserLoginMetadata) pushReceiverCredentials() (*pushreceiver.GCMCredentials, error) {
-	if m == nil || m.PushKeys == nil || strings.TrimSpace(m.PushKeys.AndroidID) == "" || strings.TrimSpace(m.PushKeys.SecurityToken) == "" {
+func (r *PushRegistration) credentials() (*pushreceiver.GCMCredentials, error) {
+	if r == nil || strings.TrimSpace(r.AndroidID) == "" || strings.TrimSpace(r.SecurityToken) == "" {
 		return nil, nil
 	}
-	androidID, err := strconv.ParseUint(strings.TrimSpace(m.PushKeys.AndroidID), 10, 64)
+	androidID, err := strconv.ParseUint(strings.TrimSpace(r.AndroidID), 10, 64)
 	if err != nil {
 		return nil, fmt.Errorf("tumblr push receiver Android ID is invalid: %w", err)
 	}
-	securityToken, err := strconv.ParseUint(strings.TrimSpace(m.PushKeys.SecurityToken), 10, 64)
+	securityToken, err := strconv.ParseUint(strings.TrimSpace(r.SecurityToken), 10, 64)
 	if err != nil {
 		return nil, fmt.Errorf("tumblr push receiver security token is invalid: %w", err)
 	}
@@ -128,12 +152,12 @@ func (m *UserLoginMetadata) pushReceiverCredentials() (*pushreceiver.GCMCredenti
 	}, nil
 }
 
-func (m *UserLoginMetadata) setPushReceiverCredentials(creds *pushreceiver.GCMCredentials) {
-	if m == nil || m.PushKeys == nil || creds == nil {
+func (r *PushRegistration) setCredentials(creds *pushreceiver.GCMCredentials) {
+	if r == nil || creds == nil {
 		return
 	}
-	m.PushKeys.AndroidID = strconv.FormatUint(creds.AndroidID, 10)
-	m.PushKeys.SecurityToken = strconv.FormatUint(creds.SecurityToken, 10)
+	r.AndroidID = strconv.FormatUint(creds.AndroidID, 10)
+	r.SecurityToken = strconv.FormatUint(creds.SecurityToken, 10)
 }
 
 func (m *UserLoginMetadata) encodedPushKeys() (p256dh, auth string, err error) {
@@ -164,8 +188,8 @@ func (m *UserLoginMetadata) String() string {
 		return "UserLoginMetadata<nil>"
 	}
 	return fmt.Sprintf(
-		"UserLoginMetadata{cookie_header:%s api_token:%s csrf_token:%s api_version:%s user_name:%s selected_blog_name:%s selected_blog_uuid:%s push_keys:%s}",
-		redactedMetadataValue(m.CookieHeader),
+		"UserLoginMetadata{session_cookies:%s api_token:%s csrf_token:%s api_version:%s user_name:%s selected_blog_name:%s selected_blog_uuid:%s push_keys:%s}",
+		redactedSessionCookiesValue(m.SessionCookies),
 		redactedMetadataValue(m.APIToken),
 		redactedMetadataValue(m.CSRFToken),
 		redactedMetadataValue(m.APIVersion),
@@ -185,7 +209,7 @@ func (m *UserLoginMetadata) MarshalZerologObject(e *zerolog.Event) {
 		e.Str("value", "<nil>")
 		return
 	}
-	e.Str("cookie_header", redactedMetadataValue(m.CookieHeader)).
+	e.Int("session_cookie_count", len(tumblr.NormalizeSessionCookies(m.SessionCookies))).
 		Str("api_token", redactedMetadataValue(m.APIToken)).
 		Str("csrf_token", redactedMetadataValue(m.CSRFToken)).
 		Str("api_version", redactedMetadataValue(m.APIVersion)).
@@ -193,9 +217,16 @@ func (m *UserLoginMetadata) MarshalZerologObject(e *zerolog.Event) {
 		Str("selected_blog_name", redactedMetadataValue(m.SelectedBlogName)).
 		Str("selected_blog_uuid", redactedMetadataValue(m.SelectedBlogUUID)).
 		Bool("has_push_keys", m.PushKeys != nil).
-		Bool("has_push_token", m.PushKeys != nil && strings.TrimSpace(m.PushKeys.Token) != "").
-		Bool("has_push_receiver", m.PushKeys != nil && strings.TrimSpace(m.PushKeys.AndroidID) != "" && strings.TrimSpace(m.PushKeys.SecurityToken) != "").
-		Bool("has_push_fcm_app_id", m.PushKeys != nil && strings.TrimSpace(m.PushKeys.FCMAppID) != "")
+		Bool("has_active_push_registration", m.PushKeys != nil && m.PushKeys.Active != nil).
+		Bool("has_pending_push_registration", m.PushKeys != nil && m.PushKeys.Pending != nil).
+		Int("retiring_push_registration_count", retiringPushRegistrationCount(m.PushKeys))
+}
+
+func retiringPushRegistrationCount(keys *PushKeys) int {
+	if keys == nil {
+		return 0
+	}
+	return len(keys.Retiring)
 }
 
 func redactedMetadataValue(value string) string {
@@ -207,6 +238,13 @@ func redactedMetadataValue(value string) string {
 
 func redactedPushKeysValue(keys *PushKeys) string {
 	if keys == nil {
+		return "<empty>"
+	}
+	return "<redacted>"
+}
+
+func redactedSessionCookiesValue(cookies map[string]string) string {
+	if len(tumblr.NormalizeSessionCookies(cookies)) == 0 {
 		return "<empty>"
 	}
 	return "<redacted>"
@@ -235,13 +273,10 @@ func normalizedUserLoginMetadata(raw any) (*UserLoginMetadata, error) {
 		return nil, fmt.Errorf("tumblr login metadata is missing")
 	}
 	normalized := *meta
-	cookieHeader := tumblr.CookieHeaderFromMap(map[string]string{"cookie_header": meta.CookieHeader})
+	sessionCookies := tumblr.NormalizeSessionCookies(meta.SessionCookies)
 	apiToken := normalizeBearerToken(meta.APIToken)
-	if strings.TrimSpace(cookieHeader) == "" && apiToken == "" {
-		return nil, fmt.Errorf("tumblr cookie header or API token is missing")
-	}
-	if strings.TrimSpace(cookieHeader) != "" && !tumblr.CookieHeaderHasPair(cookieHeader) {
-		return nil, fmt.Errorf("tumblr cookie header must include at least one name=value cookie")
+	if !tumblr.HasSessionCookies(sessionCookies) {
+		return nil, fmt.Errorf("tumblr session cookies are missing")
 	}
 	selectedBlogName := strings.TrimSpace(meta.SelectedBlogName)
 	if selectedBlogName == "" {
@@ -258,7 +293,7 @@ func normalizedUserLoginMetadata(raw any) (*UserLoginMetadata, error) {
 	if !validRemoteID(selectedBlogUUID) {
 		return nil, fmt.Errorf("selected tumblr blog uuid is invalid")
 	}
-	normalized.CookieHeader = cookieHeader
+	normalized.SessionCookies = tumblr.NormalizeSessionCookies(sessionCookies)
 	normalized.APIToken = apiToken
 	normalized.CSRFToken = normalizeOptionalHeaderCredential(meta.CSRFToken)
 	normalized.APIVersion = normalizeOptionalHeaderCredential(meta.APIVersion)
@@ -295,6 +330,21 @@ func containsMetadataSpaceOrControl(value string) bool {
 }
 
 func (tc *TumblrClient) validatedLoginMetadata() (*UserLoginMetadata, error) {
+	if tc == nil {
+		return nil, fmt.Errorf("tumblr login metadata is missing")
+	}
+	tc.loginMetadataLock.Lock()
+	defer tc.loginMetadataLock.Unlock()
+	meta, err := tc.validatedLoginMetadataLocked()
+	if err != nil {
+		return nil, err
+	}
+	return meta.clone(), nil
+}
+
+// validatedLoginMetadataLocked returns the live metadata pointer. The caller
+// must hold loginMetadataLock for the entire time it reads or mutates the value.
+func (tc *TumblrClient) validatedLoginMetadataLocked() (*UserLoginMetadata, error) {
 	if tc == nil || tc.userLogin == nil || tc.userLogin.UserLogin == nil {
 		return nil, fmt.Errorf("tumblr login metadata is missing")
 	}

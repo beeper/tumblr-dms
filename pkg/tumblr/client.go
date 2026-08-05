@@ -7,13 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime"
 	"mime/multipart"
 	"net"
 	"net/http"
-	"net/netip"
 	"net/textproto"
 	"net/url"
+	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -54,14 +53,15 @@ var apiTransientRetryDelays = []time.Duration{
 }
 
 type Options struct {
-	WebBaseURL   string
-	APIBaseURL   string
-	UserAgent    string
-	CookieHeader string
-	APIToken     string
-	CSRFToken    string
-	APIVersion   string
-	HTTPClient   *http.Client
+	WebBaseURL     string
+	APIBaseURL     string
+	UserAgent      string
+	CookieHeader   string
+	SessionCookies map[string]string
+	APIToken       string
+	CSRFToken      string
+	APIVersion     string
+	HTTPClient     *http.Client
 }
 
 type Client struct {
@@ -71,11 +71,12 @@ type Client struct {
 	webBaseURL     string
 	apiBaseURL     string
 	userAgent      string
-	cookieHeader   string
 	apiToken       string
 	csrfToken      string
 	apiVersion     string
 	httpClient     *http.Client
+	sessionURLs    []*url.URL
+	sessionUpdates chan struct{}
 }
 
 type ImageUpload struct {
@@ -92,15 +93,23 @@ func NewClient(opts Options) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
+	httpClientClone := *httpClient
+	sessionCookies := NormalizeSessionCookies(opts.SessionCookies)
+	if len(sessionCookies) == 0 {
+		sessionCookies = SessionCookiesFromHeader(opts.CookieHeader)
+	}
+	jar, sessionURLs := newSessionCookieJar(webBaseURL, apiBaseURL, sessionCookies)
+	httpClientClone.Jar = jar
 	return &Client{
-		webBaseURL:   webBaseURL,
-		apiBaseURL:   apiBaseURL,
-		userAgent:    userAgent,
-		cookieHeader: normalizeClientCookieHeader(opts.CookieHeader),
-		apiToken:     normalizeBearerToken(opts.APIToken),
-		csrfToken:    normalizeOptionalHeaderCredential(opts.CSRFToken),
-		apiVersion:   normalizeOptionalHeaderCredential(opts.APIVersion),
-		httpClient:   httpClient,
+		webBaseURL:     webBaseURL,
+		apiBaseURL:     apiBaseURL,
+		userAgent:      userAgent,
+		apiToken:       normalizeBearerToken(opts.APIToken),
+		csrfToken:      normalizeOptionalHeaderCredential(opts.CSRFToken),
+		apiVersion:     normalizeOptionalHeaderCredential(opts.APIVersion),
+		httpClient:     &httpClientClone,
+		sessionURLs:    sessionURLs,
+		sessionUpdates: make(chan struct{}, 1),
 	}
 }
 
@@ -137,46 +146,7 @@ func normalizeConfiguredBaseURL(rawURL, fallback string) string {
 }
 
 func CookieHeaderFromMap(cookies map[string]string) string {
-	header := normalizeCookieHeader(cookies["cookie_header"])
-	existingNames := cookieHeaderNames(header)
-	keys := make([]string, 0, len(cookies))
-	for key := range cookies {
-		if key == "cookie_header" || key == "api_token" || key == "csrf_token" || key == "api_version" {
-			continue
-		}
-		if _, ok := existingNames[key]; ok {
-			continue
-		}
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	parts := make([]string, 0, len(keys))
-	if header != "" {
-		parts = append(parts, header)
-	}
-	for _, key := range keys {
-		value := strings.TrimSpace(cookies[key])
-		if !validCookieMapPair(key, value) {
-			continue
-		}
-		parts = append(parts, fmt.Sprintf("%s=%s", key, value))
-	}
-	return strings.Join(parts, "; ")
-}
-
-func cookieHeaderNames(header string) map[string]struct{} {
-	names := make(map[string]struct{})
-	for _, part := range strings.Split(header, ";") {
-		name, _, ok := strings.Cut(strings.TrimSpace(part), "=")
-		if !ok {
-			continue
-		}
-		name = strings.TrimSpace(name)
-		if name != "" {
-			names[name] = struct{}{}
-		}
-	}
-	return names
+	return SessionCookieHeader(SessionCookiesFromMap(cookies))
 }
 
 func normalizeCookieHeader(input string) string {
@@ -196,26 +166,8 @@ func normalizeCookieHeader(input string) string {
 	return input
 }
 
-func normalizeClientCookieHeader(input string) string {
-	header := normalizeCookieHeader(input)
-	if !CookieHeaderHasPair(header) {
-		return ""
-	}
-	return header
-}
-
 func CookieHeaderHasPair(header string) bool {
-	header = normalizeCookieHeader(header)
-	if header == "" {
-		return false
-	}
-	for _, part := range strings.Split(header, ";") {
-		part = strings.TrimSpace(part)
-		if idx := strings.Index(part, "="); idx > 0 && idx < len(part)-1 {
-			return true
-		}
-	}
-	return false
+	return HasSessionCookies(SessionCookiesFromHeader(header))
 }
 
 func validCookieMapPair(key, value string) bool {
@@ -467,9 +419,7 @@ func containsSpaceOrControl(value string) bool {
 }
 
 func (c *Client) CookieHeader() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.cookieHeader
+	return SessionCookieHeader(c.SessionSnapshot().Cookies)
 }
 
 func (c *Client) APIToken() string {
@@ -488,6 +438,43 @@ func (c *Client) APIVersion() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.apiVersion
+}
+
+func (c *Client) SessionSnapshot() SessionSnapshot {
+	if c == nil {
+		return SessionSnapshot{}
+	}
+	c.mu.RLock()
+	snapshot := SessionSnapshot{
+		APIToken:   c.apiToken,
+		CSRFToken:  c.csrfToken,
+		APIVersion: c.apiVersion,
+	}
+	c.mu.RUnlock()
+	if c.httpClient != nil {
+		snapshot.Cookies = sessionCookiesFromJar(c.httpClient.Jar, c.sessionURLs)
+	}
+	if snapshot.Cookies == nil {
+		snapshot.Cookies = make(map[string]string)
+	}
+	return snapshot
+}
+
+func (c *Client) SessionUpdates() <-chan struct{} {
+	if c == nil {
+		return nil
+	}
+	return c.sessionUpdates
+}
+
+func (c *Client) signalSessionUpdateIfChanged(previous SessionSnapshot) {
+	if c == nil || previous.Equal(c.SessionSnapshot()) {
+		return
+	}
+	select {
+	case c.sessionUpdates <- struct{}{}:
+	default:
+	}
 }
 
 func (c *Client) needsBootstrap(mutating bool) bool {
@@ -533,6 +520,8 @@ func (c *Client) currentAuthGeneration() uint64 {
 }
 
 func (c *Client) bootstrap(ctx context.Context) error {
+	previousSession := c.SessionSnapshot()
+	defer c.signalSessionUpdateIfChanged(previousSession)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.webBaseURL+"/messaging", nil)
 	if err != nil {
 		return err
@@ -585,9 +574,9 @@ func (c *Client) bootstrapFromHTML(html string) error {
 	}
 	if apiToken == "" {
 		if strings.TrimSpace(rawAPIToken) != "" {
-			return &BootstrapError{Message: "Tumblr messaging page included an invalid API token"}
+			return &BootstrapError{Message: "Tumblr messaging page included an invalid API token", Incomplete: true}
 		}
-		return &BootstrapError{Message: "Tumblr messaging page did not include an API token"}
+		return &BootstrapError{Message: "Tumblr messaging page did not include an API token", Incomplete: true}
 	}
 	c.mu.Lock()
 	if apiBaseURL != "" {
@@ -870,7 +859,7 @@ func (c *Client) SendText(ctx context.Context, selectedBlogName, conversationID,
 		return nil, fmt.Errorf("message text is too long")
 	}
 	var response SendMessageResponse
-	err = c.do(ctx, http.MethodPost, "/v2/conversations/messages", url.Values{
+	err = c.doMessageSend(ctx, url.Values{
 		"fields[blogs]": []string{conversationBlogFields},
 	}, SendMessageRequest{
 		ConversationID: conversationID,
@@ -878,15 +867,10 @@ func (c *Client) SendText(ctx context.Context, selectedBlogName, conversationID,
 		Participant:    selectedBlogName,
 		Message:        text,
 	}, &response)
-	if err == nil && response.Conversation != nil {
-		responseConversationID, validationErr := requireIdentifierValue(response.Conversation.ID, "send response conversation ID")
-		if validationErr != nil {
-			err = validationErr
-		} else if responseConversationID != conversationID {
-			err = fmt.Errorf("send response conversation ID did not match requested conversation ID")
-		}
+	if err == nil {
+		err = validateSendResponseConversation(&response, conversationID)
 	}
-	return &response, err
+	return &response, classifySendResponseError(err)
 }
 
 func (c *Client) SendTextToParticipants(ctx context.Context, senderParticipantID string, participantIDs []string, text string) (*SendMessageResponse, error) {
@@ -905,7 +889,7 @@ func (c *Client) SendTextToParticipants(ctx context.Context, senderParticipantID
 		return nil, fmt.Errorf("message text is too long")
 	}
 	var response SendMessageResponse
-	err = c.do(ctx, http.MethodPost, "/v2/conversations/messages", url.Values{
+	err = c.doMessageSend(ctx, url.Values{
 		"fields[blogs]": []string{conversationBlogFields},
 	}, SendMessageRequest{
 		Participants: participantIDs,
@@ -914,13 +898,9 @@ func (c *Client) SendTextToParticipants(ctx context.Context, senderParticipantID
 		Message:      text,
 	}, &response)
 	if err == nil {
-		if response.Conversation == nil {
-			err = fmt.Errorf("send response conversation metadata is missing")
-		} else if _, validationErr := requireIdentifierValue(response.Conversation.ID, "send response conversation ID"); validationErr != nil {
-			err = validationErr
-		}
+		err = validateSendResponseParticipants(&response, participantIDs)
 	}
-	return &response, err
+	return &response, classifySendResponseError(err)
 }
 
 func (c *Client) SendImage(ctx context.Context, selectedBlogName, conversationID string, image ImageUpload) (*SendMessageResponse, error) {
@@ -937,7 +917,7 @@ func (c *Client) SendImage(ctx context.Context, selectedBlogName, conversationID
 		return nil, err
 	}
 	var response SendMessageResponse
-	err = c.do(ctx, http.MethodPost, "/v2/conversations/messages", url.Values{
+	err = c.doMessageSend(ctx, url.Values{
 		"fields[blogs]": []string{conversationBlogFields},
 	}, multipartFormData{
 		Fields: map[string]string{
@@ -950,15 +930,10 @@ func (c *Client) SendImage(ctx context.Context, selectedBlogName, conversationID
 		FileContentType: image.ContentType,
 		FileData:        image.Data,
 	}, &response)
-	if err == nil && response.Conversation != nil {
-		responseConversationID, validationErr := requireIdentifierValue(response.Conversation.ID, "send response conversation ID")
-		if validationErr != nil {
-			err = validationErr
-		} else if responseConversationID != conversationID {
-			err = fmt.Errorf("send response conversation ID did not match requested conversation ID")
-		}
+	if err == nil {
+		err = validateSendResponseConversation(&response, conversationID)
 	}
-	return &response, err
+	return &response, classifySendResponseError(err)
 }
 
 func (c *Client) SendImageToParticipants(ctx context.Context, senderParticipantID string, participantIDs []string, image ImageUpload) (*SendMessageResponse, error) {
@@ -975,7 +950,7 @@ func (c *Client) SendImageToParticipants(ctx context.Context, senderParticipantI
 		return nil, err
 	}
 	var response SendMessageResponse
-	err = c.do(ctx, http.MethodPost, "/v2/conversations/messages", url.Values{
+	err = c.doMessageSend(ctx, url.Values{
 		"fields[blogs]": []string{conversationBlogFields},
 	}, multipartFormData{
 		Fields: map[string]string{
@@ -989,13 +964,9 @@ func (c *Client) SendImageToParticipants(ctx context.Context, senderParticipantI
 		FileData:        image.Data,
 	}, &response)
 	if err == nil {
-		if response.Conversation == nil {
-			err = fmt.Errorf("send response conversation metadata is missing")
-		} else if _, validationErr := requireIdentifierValue(response.Conversation.ID, "send response conversation ID"); validationErr != nil {
-			err = validationErr
-		}
+		err = validateSendResponseParticipants(&response, participantIDs)
 	}
-	return &response, err
+	return &response, classifySendResponseError(err)
 }
 
 func (c *Client) SendSticker(ctx context.Context, selectedBlogName, conversationID, stickerID string) (*SendMessageResponse, error) {
@@ -1012,7 +983,7 @@ func (c *Client) SendSticker(ctx context.Context, selectedBlogName, conversation
 		return nil, err
 	}
 	var response SendMessageResponse
-	err = c.do(ctx, http.MethodPost, "/v2/conversations/messages", url.Values{
+	err = c.doMessageSend(ctx, url.Values{
 		"fields[blogs]": []string{conversationBlogFields},
 	}, SendMessageRequest{
 		ConversationID: conversationID,
@@ -1020,15 +991,10 @@ func (c *Client) SendSticker(ctx context.Context, selectedBlogName, conversation
 		Participant:    selectedBlogName,
 		StickerID:      stickerID,
 	}, &response)
-	if err == nil && response.Conversation != nil {
-		responseConversationID, validationErr := requireIdentifierValue(response.Conversation.ID, "send response conversation ID")
-		if validationErr != nil {
-			err = validationErr
-		} else if responseConversationID != conversationID {
-			err = fmt.Errorf("send response conversation ID did not match requested conversation ID")
-		}
+	if err == nil {
+		err = validateSendResponseConversation(&response, conversationID)
 	}
-	return &response, err
+	return &response, classifySendResponseError(err)
 }
 
 func (c *Client) SendStickerToParticipants(ctx context.Context, senderParticipantID string, participantIDs []string, stickerID string) (*SendMessageResponse, error) {
@@ -1045,7 +1011,7 @@ func (c *Client) SendStickerToParticipants(ctx context.Context, senderParticipan
 		return nil, err
 	}
 	var response SendMessageResponse
-	err = c.do(ctx, http.MethodPost, "/v2/conversations/messages", url.Values{
+	err = c.doMessageSend(ctx, url.Values{
 		"fields[blogs]": []string{conversationBlogFields},
 	}, SendMessageRequest{
 		Participants: participantIDs,
@@ -1054,13 +1020,9 @@ func (c *Client) SendStickerToParticipants(ctx context.Context, senderParticipan
 		StickerID:    stickerID,
 	}, &response)
 	if err == nil {
-		if response.Conversation == nil {
-			err = fmt.Errorf("send response conversation metadata is missing")
-		} else if _, validationErr := requireIdentifierValue(response.Conversation.ID, "send response conversation ID"); validationErr != nil {
-			err = validationErr
-		}
+		err = validateSendResponseParticipants(&response, participantIDs)
 	}
-	return &response, err
+	return &response, classifySendResponseError(err)
 }
 
 func (c *Client) SendPostRef(ctx context.Context, senderParticipantID, conversationID string, post PostShare) (*SendMessageResponse, error) {
@@ -1077,7 +1039,7 @@ func (c *Client) SendPostRef(ctx context.Context, senderParticipantID, conversat
 		return nil, err
 	}
 	var response SendMessageResponse
-	err = c.do(ctx, http.MethodPost, "/v2/conversations/messages", url.Values{
+	err = c.doMessageSend(ctx, url.Values{
 		"fields[blogs]": []string{conversationBlogFields},
 	}, SendMessageRequest{
 		ConversationID: conversationID,
@@ -1085,15 +1047,10 @@ func (c *Client) SendPostRef(ctx context.Context, senderParticipantID, conversat
 		Participant:    senderParticipantID,
 		Post:           post,
 	}, &response)
-	if err == nil && response.Conversation != nil {
-		responseConversationID, validationErr := requireIdentifierValue(response.Conversation.ID, "send response conversation ID")
-		if validationErr != nil {
-			err = validationErr
-		} else if responseConversationID != conversationID {
-			err = fmt.Errorf("send response conversation ID did not match requested conversation ID")
-		}
+	if err == nil {
+		err = validateSendResponseConversation(&response, conversationID)
 	}
-	return &response, err
+	return &response, classifySendResponseError(err)
 }
 
 func (c *Client) SendPostRefToParticipants(ctx context.Context, senderParticipantID string, participantIDs []string, post PostShare) (*SendMessageResponse, error) {
@@ -1110,7 +1067,7 @@ func (c *Client) SendPostRefToParticipants(ctx context.Context, senderParticipan
 		return nil, err
 	}
 	var response SendMessageResponse
-	err = c.do(ctx, http.MethodPost, "/v2/conversations/messages", url.Values{
+	err = c.doMessageSend(ctx, url.Values{
 		"fields[blogs]": []string{conversationBlogFields},
 	}, SendMessageRequest{
 		Participants: participantIDs,
@@ -1119,13 +1076,62 @@ func (c *Client) SendPostRefToParticipants(ctx context.Context, senderParticipan
 		Post:         post,
 	}, &response)
 	if err == nil {
-		if response.Conversation == nil {
-			err = fmt.Errorf("send response conversation metadata is missing")
-		} else if _, validationErr := requireIdentifierValue(response.Conversation.ID, "send response conversation ID"); validationErr != nil {
-			err = validationErr
+		err = validateSendResponseParticipants(&response, participantIDs)
+	}
+	return &response, classifySendResponseError(err)
+}
+
+func validateSendResponseConversation(response *SendMessageResponse, expectedConversationID string) error {
+	if response == nil || response.Conversation == nil {
+		return fmt.Errorf("send response conversation metadata is missing")
+	}
+	conversationID, err := requireIdentifierValue(response.Conversation.ID, "send response conversation ID")
+	if err != nil {
+		return err
+	}
+	if expectedConversationID != "" && conversationID != expectedConversationID {
+		return fmt.Errorf("send response conversation ID did not match requested conversation ID")
+	}
+	return nil
+}
+
+func validateSendResponseParticipants(response *SendMessageResponse, expectedParticipantIDs []string) error {
+	if err := validateSendResponseConversation(response, ""); err != nil {
+		return err
+	}
+	actualParticipantIDs := make([]string, 0, len(response.Conversation.Participants))
+	for _, participant := range response.Conversation.Participants {
+		participantID, err := requireIdentifierValue(participant.UUID, "send response participant UUID")
+		if err != nil {
+			return err
+		}
+		actualParticipantIDs = append(actualParticipantIDs, participantID)
+	}
+	expectedParticipantIDs = append([]string(nil), expectedParticipantIDs...)
+	sort.Strings(actualParticipantIDs)
+	sort.Strings(expectedParticipantIDs)
+	if len(actualParticipantIDs) != len(expectedParticipantIDs) {
+		return fmt.Errorf("send response participants did not match requested participants")
+	}
+	for i := range actualParticipantIDs {
+		if actualParticipantIDs[i] != expectedParticipantIDs[i] {
+			return fmt.Errorf("send response participants did not match requested participants")
 		}
 	}
-	return &response, err
+	return nil
+}
+
+func classifySendResponseError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var sendErr *MessageSendError
+	if errors.As(err, &sendErr) {
+		return err
+	}
+	// At this point the POST returned a successful status, but its body did not
+	// prove which conversation/message was accepted. Treat that as unknown.
+	return &MessageSendError{Err: err, Definite: false}
 }
 
 func (c *Client) MarkConversationAsRead(ctx context.Context, selectedBlogName, conversationID string) error {
@@ -1223,7 +1229,7 @@ func requireImageUpload(input ImageUpload) (ImageUpload, error) {
 	if int64(len(input.Data)) > DefaultMaxUploadBytes {
 		return ImageUpload{}, fmt.Errorf("image data is too large")
 	}
-	contentType, err := normalizeImageUploadContentType(input.ContentType, input.Data)
+	contentType, err := SniffImageMIME(input.Data)
 	if err != nil {
 		return ImageUpload{}, err
 	}
@@ -1232,24 +1238,6 @@ func requireImageUpload(input ImageUpload) (ImageUpload, error) {
 		FileName:    cleanUploadFileName(input.FileName, contentType),
 		ContentType: contentType,
 	}, nil
-}
-
-func normalizeImageUploadContentType(contentType string, data []byte) (string, error) {
-	contentType = strings.TrimSpace(contentType)
-	if contentType != "" {
-		parsed, _, err := mime.ParseMediaType(contentType)
-		if err != nil {
-			return "", fmt.Errorf("image content type is invalid")
-		}
-		contentType = parsed
-	} else {
-		contentType = http.DetectContentType(data)
-	}
-	contentType = strings.ToLower(strings.TrimSpace(contentType))
-	if !strings.HasPrefix(contentType, "image/") {
-		return "", fmt.Errorf("image content type is not supported")
-	}
-	return contentType, nil
 }
 
 func cleanUploadFileName(fileName, contentType string) string {
@@ -1268,11 +1256,15 @@ func cleanUploadFileName(fileName, contentType string) string {
 		}
 	}, fileName)
 	if strings.TrimSpace(fileName) != "" {
-		return fileName
+		extension := CanonicalImageExtension(contentType)
+		baseName := strings.TrimSuffix(fileName, path.Ext(fileName))
+		if strings.TrimSpace(baseName) == "" {
+			baseName = "tumblr-image"
+		}
+		return baseName + extension
 	}
-	extensions, _ := mime.ExtensionsByType(contentType)
-	if len(extensions) > 0 {
-		return "tumblr-image" + extensions[0]
+	if extension := CanonicalImageExtension(contentType); extension != "" {
+		return "tumblr-image" + extension
 	}
 	return "tumblr-image"
 }
@@ -1289,176 +1281,6 @@ func requireIdentifierValue(value, fieldName string) (string, error) {
 		return "", fmt.Errorf("%s is invalid", fieldName)
 	}
 	return value, nil
-}
-
-func (c *Client) Download(ctx context.Context, rawURL string, maxBytes int64) ([]byte, error) {
-	if maxBytes <= 0 {
-		maxBytes = DefaultMaxDownloadBytes
-	}
-	downloadURL, err := normalizeDownloadURL(rawURL)
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", c.userAgent)
-	req.Header.Set("Accept", "image/webp,image/png,image/jpeg,image/*;q=0.8,*/*;q=0.5")
-	resp, err := c.downloadHTTPClient().Do(req)
-	if err != nil {
-		if resp != nil && resp.Body != nil {
-			resp.Body.Close()
-		}
-		return nil, fmt.Errorf("download request failed")
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("download failed with HTTP %d", resp.StatusCode)
-	}
-	if resp.ContentLength > maxBytes {
-		return nil, fmt.Errorf("download is too large")
-	}
-	if !isImageContentType(resp.Header.Get("Content-Type")) {
-		return nil, fmt.Errorf("download content type is not an image")
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("download read failed")
-	}
-	if int64(len(body)) > maxBytes {
-		return nil, fmt.Errorf("download is too large")
-	}
-	return body, nil
-}
-
-func (c *Client) downloadHTTPClient() *http.Client {
-	httpClient := c.httpClient
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
-	}
-	clone := *httpClient
-	existingCheckRedirect := clone.CheckRedirect
-	clone.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if req == nil || req.URL == nil {
-			return fmt.Errorf("download redirect URL is invalid")
-		}
-		if _, err := normalizeDownloadURL(req.URL.String()); err != nil {
-			return fmt.Errorf("download redirect URL is not allowed")
-		}
-		if existingCheckRedirect != nil {
-			return existingCheckRedirect(req, via)
-		}
-		if len(via) >= 10 {
-			return fmt.Errorf("stopped after 10 redirects")
-		}
-		return nil
-	}
-	return &clone
-}
-
-func isImageContentType(contentType string) bool {
-	contentType = strings.TrimSpace(strings.ToLower(contentType))
-	if contentType == "" {
-		return true
-	}
-	contentType, _, _ = strings.Cut(contentType, ";")
-	return strings.HasPrefix(strings.TrimSpace(contentType), "image/")
-}
-
-func normalizeDownloadURL(rawURL string) (string, error) {
-	parsed, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil {
-		return "", fmt.Errorf("download URL is invalid")
-	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return "", fmt.Errorf("download URL must use http or https")
-	}
-	if parsed.Host == "" {
-		return "", fmt.Errorf("download URL host is missing")
-	}
-	if parsed.User != nil {
-		return "", fmt.Errorf("download URL user info is not allowed")
-	}
-	if !isTrustedTumblrDownloadHost(parsed.Hostname()) {
-		return "", fmt.Errorf("download URL host is not allowed")
-	}
-	if isUnsafeDownloadHost(parsed.Hostname()) {
-		return "", fmt.Errorf("download URL host is not allowed")
-	}
-	return parsed.String(), nil
-}
-
-// IsDownloadURLAllowed reports whether Download would accept rawURL before making a request.
-func IsDownloadURLAllowed(rawURL string) bool {
-	_, err := normalizeDownloadURL(rawURL)
-	return err == nil
-}
-
-func isTrustedTumblrDownloadHost(host string) bool {
-	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
-	return host == "tumblr.com" || strings.HasSuffix(host, ".tumblr.com")
-}
-
-func isUnsafeDownloadHost(host string) bool {
-	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
-	if host == "" {
-		return true
-	}
-	if host == "localhost" || strings.HasSuffix(host, ".localhost") ||
-		host == "localdomain" || strings.HasSuffix(host, ".localdomain") ||
-		host == "local" || strings.HasSuffix(host, ".local") {
-		return true
-	}
-	hostNoZone, _, _ := strings.Cut(host, "%")
-	addr, err := netip.ParseAddr(hostNoZone)
-	if err != nil {
-		return isLegacyNumericIPv4Host(hostNoZone)
-	}
-	addr = addr.Unmap()
-	return addr.IsLoopback() ||
-		addr.IsPrivate() ||
-		addr.IsLinkLocalUnicast() ||
-		addr.IsLinkLocalMulticast() ||
-		addr.IsUnspecified() ||
-		addr.IsMulticast() ||
-		!addr.IsGlobalUnicast()
-}
-
-func isLegacyNumericIPv4Host(host string) bool {
-	parts := strings.Split(host, ".")
-	if len(parts) == 0 || len(parts) > 4 {
-		return false
-	}
-	for _, part := range parts {
-		if !isLegacyNumericIPv4Part(part) {
-			return false
-		}
-	}
-	return true
-}
-
-func isLegacyNumericIPv4Part(part string) bool {
-	if part == "" {
-		return false
-	}
-	if strings.HasPrefix(part, "0x") || strings.HasPrefix(part, "0X") {
-		if len(part) == 2 {
-			return false
-		}
-		for _, r := range part[2:] {
-			if !unicode.IsDigit(r) && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
-				return false
-			}
-		}
-		return true
-	}
-	for _, r := range part {
-		if !unicode.IsDigit(r) {
-			return false
-		}
-	}
-	return true
 }
 
 type multipartFormData struct {
@@ -1521,7 +1343,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	for {
 		requestGeneration := c.currentAuthGeneration()
 		err = c.doOnce(ctx, method, path, query, body, out)
-		if IsAuthRefreshCandidate(err) && !authRetried {
+		if ShouldRefreshAuth(err, mutating) && !authRetried {
 			authRetried = true
 			if err = c.refreshAuthAfterFailure(ctx, requestGeneration); err != nil {
 				return err
@@ -1549,6 +1371,66 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	}
 }
 
+// doMessageSend disables redirects and transient retries. It only retries once
+// when Tumblr definitively rejected the first request for expired credentials
+// and fresh credentials were loaded successfully.
+func (c *Client) doMessageSend(ctx context.Context, query url.Values, body any, out any) error {
+	if c.needsBootstrap(true) {
+		if err := c.bootstrapIfNeeded(ctx, true); err != nil {
+			return &MessageSendError{Err: err, Definite: true}
+		}
+	}
+	if !c.hasCSRFToken() {
+		return &MessageSendError{Err: fmt.Errorf("tumblr API CSRF token is missing"), Definite: true}
+	}
+	requestGeneration := c.currentAuthGeneration()
+	err := c.doOnceWithRedirectPolicy(
+		ctx,
+		http.MethodPost,
+		"/v2/conversations/messages",
+		query,
+		body,
+		out,
+		false,
+	)
+	if err == nil {
+		return nil
+	}
+	definite := isDefiniteMessageRejection(err)
+	sendErr := &MessageSendError{Err: err, Definite: definite}
+	if !definite || !ShouldRefreshAuth(err, true) {
+		return sendErr
+	}
+	if refreshErr := c.refreshAuthAfterFailure(ctx, requestGeneration); refreshErr != nil {
+		sendErr.authRefreshError = fmt.Errorf("refresh Tumblr authentication after rejected message: %w", refreshErr)
+		return sendErr
+	}
+	if !c.hasCSRFToken() {
+		sendErr.authRefreshError = errors.New("refresh Tumblr authentication after rejected message: CSRF token is missing")
+		return sendErr
+	}
+
+	retryErr := c.doOnceWithRedirectPolicy(
+		ctx,
+		http.MethodPost,
+		"/v2/conversations/messages",
+		query,
+		body,
+		out,
+		false,
+	)
+	if retryErr == nil {
+		return nil
+	}
+	return &MessageSendError{Err: retryErr, Definite: isDefiniteMessageRejection(retryErr)}
+}
+
+func isDefiniteMessageRejection(err error) bool {
+	var apiErr *Error
+	return errors.As(err, &apiErr) &&
+		apiErr.StatusCode >= http.StatusBadRequest && apiErr.StatusCode < http.StatusInternalServerError
+}
+
 func isRetryableTransientSendError(method, path string, err error) bool {
 	if method != http.MethodPost || path != "/v2/conversations/messages" {
 		return false
@@ -1558,6 +1440,12 @@ func isRetryableTransientSendError(method, path string, err error) bool {
 }
 
 func (c *Client) doOnce(ctx context.Context, method, path string, query url.Values, body any, out any) error {
+	return c.doOnceWithRedirectPolicy(ctx, method, path, query, body, out, true)
+}
+
+func (c *Client) doOnceWithRedirectPolicy(ctx context.Context, method, path string, query url.Values, body any, out any, allowRedirects bool) error {
+	previousSession := c.SessionSnapshot()
+	defer c.signalSessionUpdateIfChanged(previousSession)
 	c.mu.RLock()
 	apiBaseURL := c.apiBaseURL
 	c.mu.RUnlock()
@@ -1594,11 +1482,23 @@ func (c *Client) doOnce(ctx context.Context, method, path string, query url.Valu
 	if err != nil {
 		return err
 	}
+	if !allowRedirects {
+		// NewRequest makes byte buffers replayable through GetBody. Clearing it
+		// prevents the HTTP/2 transport from resubmitting a message body after an
+		// ambiguous stream failure.
+		req.GetBody = nil
+	}
 	c.setAPIHeaders(req, body != nil)
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
-	resp, err := c.apiHTTPClient(apiBaseURL).Do(req)
+	httpClient := c.apiHTTPClient(apiBaseURL)
+	if !allowRedirects {
+		httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		if resp != nil && resp.Body != nil {
 			resp.Body.Close()
@@ -1606,6 +1506,11 @@ func (c *Client) doOnce(ctx context.Context, method, path string, query url.Valu
 		return fmt.Errorf("tumblr API request failed")
 	}
 	defer resp.Body.Close()
+	if csrf := responseCSRFToken(resp.Header); csrf != "" {
+		c.mu.Lock()
+		c.csrfToken = csrf
+		c.mu.Unlock()
+	}
 
 	if resp.Request != nil && resp.Request.URL != nil && isLoginPath(resp.Request.URL.Path) {
 		return &Error{
@@ -1615,12 +1520,13 @@ func (c *Client) doOnce(ctx context.Context, method, path string, query url.Valu
 	}
 	responseBody, err := readLimitedBody(resp.Body, maxAPIResponseBytes, "Tumblr API response")
 	if err != nil {
+		if resp.StatusCode >= http.StatusBadRequest && resp.StatusCode < http.StatusInternalServerError {
+			return &Error{
+				StatusCode: resp.StatusCode,
+				Status:     safeErrorDetail(resp.Status),
+			}
+		}
 		return err
-	}
-	if csrf := responseCSRFToken(resp.Header); csrf != "" {
-		c.mu.Lock()
-		c.csrfToken = csrf
-		c.mu.Unlock()
 	}
 
 	var envelope struct {
@@ -1718,15 +1624,11 @@ func readLimitedBody(reader io.Reader, maxBytes int64, description string) ([]by
 func (c *Client) setBrowserHeaders(req *http.Request) {
 	req.Header.Set("User-Agent", c.userAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	if c.cookieHeader != "" {
-		req.Header.Set("Cookie", c.cookieHeader)
-	}
 }
 
 func (c *Client) setAPIHeaders(req *http.Request, hasBody bool) {
 	c.mu.RLock()
 	apiToken := c.apiToken
-	cookieHeader := c.cookieHeader
 	csrfToken := c.csrfToken
 	apiVersion := c.apiVersion
 	c.mu.RUnlock()
@@ -1735,9 +1637,6 @@ func (c *Client) setAPIHeaders(req *http.Request, hasBody bool) {
 	req.Header.Set("Accept", "application/json;format=camelcase")
 	if apiVersion != "" {
 		req.Header.Set("X-Version", apiVersion)
-	}
-	if cookieHeader != "" {
-		req.Header.Set("Cookie", cookieHeader)
 	}
 	if hasBody {
 		req.Header.Set("Content-Type", "application/json; charset=utf8")

@@ -47,7 +47,7 @@ func (tc *TumblrClient) FetchMessages(ctx context.Context, params bridgev2.Fetch
 	if params.Forward {
 		messages, ok := params.BundledData.([]tumblr.Message)
 		if ok {
-			return tc.backfillResponseFromMessagesWithAnchorAndLimit(ctx, params.Portal, messages, params.AnchorMessage, count), nil
+			return tc.backfillResponseFromMessagesWithAnchorAndLimit(ctx, params.Portal, messages, params.AnchorMessage, count)
 		}
 		return &bridgev2.FetchMessagesResponse{
 			Forward: true,
@@ -77,12 +77,19 @@ func (tc *TumblrClient) FetchMessages(ctx context.Context, params bridgev2.Fetch
 	if err = validateConversationHistoryResponse(conversationID, resp); err != nil {
 		return nil, err
 	}
-	tc.markConversationMessagesSeen(conversationID, resp.Messages)
-	backfill := tc.backfillResponseFromMessages(ctx, params.Portal, resp.Messages, false)
-	if nextBefore := strings.TrimSpace(resp.NextBefore()); nextBefore != "" {
+	backfill, err := tc.backfillResponseFromMessages(ctx, params.Portal, resp.Messages, false)
+	if err != nil {
+		return nil, err
+	}
+	nextBefore, err := resp.NextBefore()
+	if err != nil {
+		return nil, err
+	}
+	if nextBefore = strings.TrimSpace(nextBefore); nextBefore != "" {
 		backfill.Cursor = networkid.PaginationCursor(nextBefore)
 		backfill.HasMore = true
 	}
+	tc.markConversationMessagesSeen(conversationID, resp.Messages)
 	return backfill, nil
 }
 
@@ -113,17 +120,17 @@ func (tc *TumblrClient) backfillLimit(requested int) int {
 	return requested
 }
 
-func (tc *TumblrClient) backfillResponseFromMessages(ctx context.Context, portal *bridgev2.Portal, messages []tumblr.Message, forward bool) *bridgev2.FetchMessagesResponse {
+func (tc *TumblrClient) backfillResponseFromMessages(ctx context.Context, portal *bridgev2.Portal, messages []tumblr.Message, forward bool) (*bridgev2.FetchMessagesResponse, error) {
 	return tc.backfillResponseFromMessagesWithFallbackAndLimit(ctx, portal, messages, forward, time.Now(), 0)
 }
 
-func (tc *TumblrClient) backfillResponseFromMessagesWithAnchorAndLimit(ctx context.Context, portal *bridgev2.Portal, messages []tumblr.Message, anchor *database.Message, limit int) *bridgev2.FetchMessagesResponse {
+func (tc *TumblrClient) backfillResponseFromMessagesWithAnchorAndLimit(ctx context.Context, portal *bridgev2.Portal, messages []tumblr.Message, anchor *database.Message, limit int) (*bridgev2.FetchMessagesResponse, error) {
 	fallbackTimestamp := time.Now()
 	messages = messagesAfterAnchor(messages, anchor, fallbackTimestamp)
 	return tc.backfillResponseFromMessagesWithFallbackAndLimit(ctx, portal, messages, true, fallbackTimestamp, limit)
 }
 
-func (tc *TumblrClient) backfillResponseFromMessagesWithFallbackAndLimit(ctx context.Context, portal *bridgev2.Portal, messages []tumblr.Message, forward bool, fallbackTimestamp time.Time, limit int) *bridgev2.FetchMessagesResponse {
+func (tc *TumblrClient) backfillResponseFromMessagesWithFallbackAndLimit(ctx context.Context, portal *bridgev2.Portal, messages []tumblr.Message, forward bool, fallbackTimestamp time.Time, limit int) (*bridgev2.FetchMessagesResponse, error) {
 	messages = sortedMessagesWithReference(messages, fallbackTimestamp)
 	backfillMessages := make([]*bridgev2.BackfillMessage, 0, len(messages))
 	seenIDs := make(map[string]struct{}, len(messages))
@@ -136,11 +143,15 @@ func (tc *TumblrClient) backfillResponseFromMessagesWithFallbackAndLimit(ctx con
 		}
 		seenIDs[message.ID] = struct{}{}
 		ts := messageTimestampWithFallback(message, fallbackTimestamp)
+		converted, err := tc.convertTumblrMessageForBackfill(ctx, portal, message)
+		if err != nil {
+			return nil, err
+		}
 		backfillMessages = append(backfillMessages, &bridgev2.BackfillMessage{
-			ConvertedMessage: tc.convertTumblrMessageForBackfill(ctx, portal, message),
+			ConvertedMessage: converted,
 			Sender:           tc.senderFromMessage(message),
 			ID:               tumblrid.MakeMessageID(message.ID),
-			TxnID:            networkid.TransactionID(message.ID),
+			TxnID:            "",
 			Timestamp:        ts,
 			StreamOrder:      ts.UnixMilli(),
 		})
@@ -153,18 +164,14 @@ func (tc *TumblrClient) backfillResponseFromMessagesWithFallbackAndLimit(ctx con
 		Forward:                 forward,
 		HasMore:                 false,
 		AggressiveDeduplication: true,
-	}
+	}, nil
 }
 
-func (tc *TumblrClient) convertTumblrMessageForBackfill(ctx context.Context, portal *bridgev2.Portal, message tumblr.Message) *bridgev2.ConvertedMessage {
-	uploader := tc.backfillMediaUploader()
-	if messageCanUseImageMedia(message) && uploader != nil {
-		converted, err := tc.convertTumblrMessageWithMedia(ctx, portal, uploader, message)
-		if err == nil && converted != nil {
-			return converted
-		}
+func (tc *TumblrClient) convertTumblrMessageForBackfill(ctx context.Context, portal *bridgev2.Portal, message tumblr.Message) (*bridgev2.ConvertedMessage, error) {
+	if !messageCanUseImageMedia(message) {
+		return tc.convertTumblrMessage(message), nil
 	}
-	return tc.convertTumblrMessage(message)
+	return tc.convertTumblrMessageWithMedia(ctx, portal, tc.backfillMediaUploader(), message)
 }
 
 func (tc *TumblrClient) backfillMediaUploader() bridgev2.MatrixAPI {
@@ -185,7 +192,7 @@ func messagesAfterAnchor(messages []tumblr.Message, anchor *database.Message, fa
 			continue
 		}
 		if !anchor.Timestamp.IsZero() {
-			if saneTS, ok := saneTumblrTimestamp(message.Timestamp, fallbackTimestamp); !ok || !saneTS.After(anchor.Timestamp) {
+			if saneTS, ok := saneTumblrTimestamp(message.Timestamp, fallbackTimestamp); !ok || saneTS.Before(anchor.Timestamp) {
 				continue
 			}
 		}

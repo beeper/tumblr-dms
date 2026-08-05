@@ -4,8 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"mime"
-	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -18,7 +16,6 @@ import (
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/bridgev2/simplevent"
 	"maunium.net/go/mautrix/event"
-	"maunium.net/go/mautrix/id"
 
 	"github.com/ifixrobots/tumblr-dms/pkg/msgconv"
 	"github.com/ifixrobots/tumblr-dms/pkg/tumblr"
@@ -28,11 +25,15 @@ import (
 const (
 	maxSeenMessages                = 10000
 	maxConversationListPages       = 1000
+	maxConversationMessagePages    = 1000
 	maxRemoteIDRunes               = 512
 	maxConversationTitleRunes      = 200
 	maxPostSummaryRunes            = 160
 	maxUnsupportedMessageTypeRunes = 80
 	maxTumblrTimestampFutureSkew   = 24 * time.Hour
+	tumblrPortalMutationTimeout    = 2 * time.Minute
+	tumblrRemoteDeliveryTimeout    = 5 * time.Minute
+	tumblrRemoteDeliveryPoll       = 100 * time.Millisecond
 	unknownTumblrUserID            = networkid.UserID("unknown-tumblr-user")
 )
 
@@ -42,18 +43,36 @@ func validRemoteID(id string) bool {
 		!containsMetadataSpaceOrControl(id)
 }
 
-func (tc *TumblrClient) syncConversations(ctx context.Context) error {
-	return tc.fetchAndQueueConversations(ctx)
-}
-
-func (tc *TumblrClient) syncConversationByID(ctx context.Context, conversationID string) error {
+// syncConversationByIDWithSubmissionLock requires the caller to hold this
+// login's submission fence before taking syncLock.
+func (tc *TumblrClient) syncConversationByIDWithSubmissionLock(
+	ctx context.Context,
+	conversationID string,
+	expectedRevision int64,
+) error {
 	if !validRemoteID(conversationID) {
 		return fmt.Errorf("tumblr conversation ID is invalid")
 	}
 	tc.syncLock.Lock()
 	defer tc.syncLock.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	job, err := tc.connector.DB.Jobs.Get(ctx, tc.userLogin.ID, conversationID)
+	if err != nil {
+		return fmt.Errorf("failed to reload Tumblr conversation sync job: %w", err)
+	}
+	if expectedRevision > 0 && (job == nil || job.Revision != expectedRevision || job.NextAttemptAt.After(time.Now())) {
+		return errTumblrConversationJobSuperseded
+	}
+	if job != nil && job.DeleteRoomID != "" {
+		if job.NextAttemptAt.After(time.Now()) {
+			return errTumblrConversationJobSuperseded
+		}
+		return tc.handleRemoteConversationDelete(ctx, conversationID, job.Revision)
+	}
 
-	if err := tc.requireLoggedIn(); err != nil {
+	if err := tc.requireLoggedInForContext(ctx); err != nil {
 		return err
 	}
 	meta, err := tc.validatedLoginMetadata()
@@ -68,107 +87,259 @@ func (tc *TumblrClient) syncConversationByID(ctx context.Context, conversationID
 	if err != nil {
 		return err
 	}
-	resp, err := client.GetConversation(ctx, meta.SelectedBlogName, conversationID, limit)
+	conversation, fetchedHeadMessageID, err := tc.fetchConversationForSync(
+		ctx,
+		client,
+		meta.SelectedBlogName,
+		tumblr.Conversation{ID: conversationID},
+		limit,
+	)
 	if err != nil {
+		if tumblr.IsNotFound(err) {
+			if job == nil {
+				if expectedRevision > 0 {
+					return errTumblrConversationJobSuperseded
+				}
+				if ensureErr := tc.connector.DB.Jobs.Ensure(ctx, tc.userLogin.ID, conversationID); ensureErr != nil {
+					return fmt.Errorf("failed to persist missing Tumblr conversation cleanup: %w", ensureErr)
+				}
+				job, err = tc.connector.DB.Jobs.Get(ctx, tc.userLogin.ID, conversationID)
+				if err != nil {
+					return fmt.Errorf("failed to reload missing Tumblr conversation cleanup: %w", err)
+				}
+				if job == nil {
+					return fmt.Errorf("missing Tumblr conversation cleanup was not persisted")
+				}
+			}
+			return tc.handleRemoteConversationDelete(ctx, conversationID, job.Revision)
+		}
 		if tumblr.IsAuthError(err) {
 			return tc.handleRemoteError(err)
 		}
 		return err
 	}
-	if err = validateConversationHistoryResponse(conversationID, resp); err != nil {
-		return err
-	}
-	conversation := mergeConversationHistoryForSync(tumblr.Conversation{ID: conversationID}, resp)
 	if log := tc.log(); log != nil {
 		log.Info().
 			Str("conversation_id_hash", logIdentifierHash(conversationID)).
 			Int("message_count", len(conversation.Messages.Data)).
 			Msg("Fetched pushed Tumblr conversation")
 	}
-	tc.queueConversation(ctx, conversation, true)
-	return nil
+	return tc.queueFetchedConversation(ctx, conversation, fetchedHeadMessageID)
 }
 
-func (tc *TumblrClient) fetchAndQueueConversations(ctx context.Context) error {
-	tc.syncLock.Lock()
-	defer tc.syncLock.Unlock()
-
-	if err := tc.requireLoggedIn(); err != nil {
-		return err
+func (tc *TumblrClient) fetchConversationForSync(
+	ctx context.Context,
+	client *tumblr.Client,
+	selectedBlogName string,
+	listConversation tumblr.Conversation,
+	limit int,
+) (tumblr.Conversation, string, error) {
+	conversationID := listConversation.ID
+	if !validRemoteID(conversationID) {
+		return tumblr.Conversation{}, "", fmt.Errorf("tumblr conversation ID is invalid")
 	}
-	meta, err := tc.validatedLoginMetadata()
+	if tc == nil || tc.connector == nil || tc.connector.Bridge == nil || tc.connector.DB == nil || tc.userLogin == nil {
+		return tumblr.Conversation{}, "", fmt.Errorf("tumblr bridge is unavailable")
+	}
+	portalKey := tc.portalKey(conversationID)
+	portal, err := tc.connector.Bridge.GetExistingPortalByKey(ctx, portalKey)
 	if err != nil {
-		return err
+		return tumblr.Conversation{}, "", fmt.Errorf("failed to load Tumblr portal before conversation sync: %w", err)
 	}
-	limit := defaultConversationSyncLimit
-	if tc.connector != nil {
-		limit = tc.connector.Config.ConversationSyncBatchLimit()
+	catchUpExistingPortal := portal != nil && portal.Portal != nil && portal.MXID != ""
+	previousCompletedHeadMessageID := ""
+	if catchUpExistingPortal {
+		state, stateErr := tc.connector.DB.ConversationSync.Get(ctx, tc.userLogin.ID, conversationID)
+		if stateErr != nil {
+			return tumblr.Conversation{}, "", fmt.Errorf("failed to load Tumblr conversation sync boundary: %w", stateErr)
+		}
+		if state != nil && validRemoteID(state.CompletedHeadMessageID) {
+			previousCompletedHeadMessageID = state.CompletedHeadMessageID
+		}
+		// A portal can be created before its completed boundary is saved if the
+		// process stops mid-delivery. Scan to the end once to recover that work.
 	}
-	client, err := tc.tumblrClient()
-	if err != nil {
-		return err
-	}
-	seenCursors := map[string]struct{}{}
 	before := ""
-	pagesFetched := 0
-	conversationsQueued := 0
-	defer func(startedAt time.Time) {
-		if log := tc.log(); log != nil {
-			log.Info().
-				Dur("duration", time.Since(startedAt)).
-				Int("pages_fetched", pagesFetched).
-				Int("conversations_queued", conversationsQueued).
-				Msg("Finished Tumblr conversation sync attempt")
-		}
-	}(time.Now())
-	for page := 0; page < maxConversationListPages; page++ {
-		resp, err := client.ListConversationsBefore(ctx, meta.SelectedBlogUUID, limit, before)
+	seenCursors := make(map[string]struct{})
+	messagePages := make([][]tumblr.Message, 0, 1)
+	var conversation tumblr.Conversation
+	fetchedHeadMessageID := ""
+	for page := 0; page < maxConversationMessagePages; page++ {
+		resp, err := client.GetConversationBefore(ctx, selectedBlogName, conversationID, limit, before)
 		if err != nil {
-			return err
-		}
-		pagesFetched++
-		for _, conversation := range resp.Conversations {
-			conversation, err = tc.hydrateConversationForSync(ctx, client, meta.SelectedBlogName, conversation, limit)
-			if err != nil {
-				return err
+			if page > 0 && tumblr.IsNotFound(err) {
+				// Page one already proved that the conversation exists. A later
+				// cursor disappearing is retryable and must not delete a live room.
+				return tumblr.Conversation{}, "", fmt.Errorf("tumblr conversation history page disappeared during sync")
 			}
-			tc.queueConversation(ctx, conversation, true)
-			conversationsQueued++
+			return tumblr.Conversation{}, "", err
 		}
-		nextBefore := strings.TrimSpace(resp.NextBefore())
+		if err = validateConversationHistoryResponse(conversationID, resp); err != nil {
+			return tumblr.Conversation{}, "", err
+		}
+		if page == 0 {
+			conversation = mergeConversationHistoryForSync(listConversation, resp)
+		}
+		pageMessages := conversationMessagesFromResponse(resp)
+		if page == 0 {
+			fetchedHeadMessageID = conversationPageHeadMessageID(pageMessages)
+		}
+		messagePages = append(messagePages, pageMessages)
+		if !catchUpExistingPortal {
+			conversation.Messages.Data = aggregateConversationMessagePages(messagePages)
+			return conversation, fetchedHeadMessageID, nil
+		}
+		if conversationPageContainsMessageID(pageMessages, previousCompletedHeadMessageID) {
+			conversation.Messages.Data = aggregateConversationMessagePages(messagePages)
+			return conversation, fetchedHeadMessageID, nil
+		}
+		nextBefore, cursorErr := resp.NextBefore()
+		if cursorErr != nil {
+			return tumblr.Conversation{}, "", cursorErr
+		}
+		nextBefore = strings.TrimSpace(nextBefore)
 		if nextBefore == "" {
-			return nil
+			conversation.Messages.Data = aggregateConversationMessagePages(messagePages)
+			return conversation, fetchedHeadMessageID, nil
 		}
-		if _, ok := seenCursors[nextBefore]; ok {
-			return nil
+		if _, duplicate := seenCursors[nextBefore]; duplicate {
+			return tumblr.Conversation{}, "", fmt.Errorf("tumblr conversation history cursor repeated")
 		}
 		seenCursors[nextBefore] = struct{}{}
 		before = nextBefore
 	}
+	return tumblr.Conversation{}, "", fmt.Errorf("tumblr conversation history exceeded %d pages", maxConversationMessagePages)
+}
+
+func conversationMessagesFromResponse(resp *tumblr.ConversationMessagesResponse) []tumblr.Message {
+	if resp == nil {
+		return nil
+	}
+	if len(resp.Messages) > 0 {
+		return append([]tumblr.Message(nil), resp.Messages...)
+	}
+	if resp.Conversation != nil {
+		return append([]tumblr.Message(nil), resp.Conversation.Messages.Data...)
+	}
 	return nil
 }
 
-func (tc *TumblrClient) hydrateConversationForSync(ctx context.Context, client *tumblr.Client, selectedBlogName string, conversation tumblr.Conversation, limit int) (tumblr.Conversation, error) {
-	if !validRemoteID(conversation.ID) {
-		return conversation, nil
+func aggregateConversationMessagePages(pages [][]tumblr.Message) []tumblr.Message {
+	total := 0
+	for _, page := range pages {
+		total += len(page)
 	}
-	resp, err := client.GetConversation(ctx, selectedBlogName, conversation.ID, limit)
+	messages := make([]tumblr.Message, 0, total)
+	seenIDs := make(map[string]struct{}, total)
+	for pageIndex := len(pages) - 1; pageIndex >= 0; pageIndex-- {
+		for _, message := range pages[pageIndex] {
+			if validRemoteID(message.ID) {
+				if _, duplicate := seenIDs[message.ID]; duplicate {
+					continue
+				}
+				seenIDs[message.ID] = struct{}{}
+			}
+			messages = append(messages, message)
+		}
+	}
+	return messages
+}
+
+func conversationPageHeadMessageID(messages []tumblr.Message) string {
+	sorted := sortedMessages(messages)
+	for index := len(sorted) - 1; index >= 0; index-- {
+		if validRemoteID(sorted[index].ID) {
+			return sorted[index].ID
+		}
+	}
+	return ""
+}
+
+func conversationPageContainsMessageID(messages []tumblr.Message, messageID string) bool {
+	if messageID == "" {
+		return false
+	}
+	for _, message := range messages {
+		if message.ID == messageID {
+			return true
+		}
+	}
+	return false
+}
+
+type outboundReconciliationDeferredError struct {
+	messageCount int
+}
+
+func (err *outboundReconciliationDeferredError) Error() string {
+	return fmt.Sprintf("%d Tumblr message(s) held for safe outbound reconciliation", err.messageCount)
+}
+
+func (tc *TumblrClient) queueFetchedConversation(
+	ctx context.Context,
+	conversation tumblr.Conversation,
+	fetchedHeadMessageID string,
+) error {
+	heldMessageIDs, err := tc.queueConversation(ctx, conversation, true)
 	if err != nil {
-		if tumblr.IsAuthError(err) {
-			return conversation, tc.handleRemoteError(err)
-		}
-		if log := tc.log(); log != nil {
-			log.Warn().Err(err).Str("conversation_id_hash", logIdentifierHash(conversation.ID)).Msg("Failed to fetch Tumblr conversation history during sync")
-		}
-		return conversation, nil
+		return err
 	}
-	if err = validateConversationHistoryResponse(conversation.ID, resp); err != nil {
-		if log := tc.log(); log != nil {
-			log.Warn().Err(err).Str("conversation_id_hash", logIdentifierHash(conversation.ID)).Msg("Ignoring malformed Tumblr conversation history during sync")
-		}
-		return conversation, nil
+	if err = tc.confirmFetchedConversationMessagesStored(ctx, conversation, heldMessageIDs); err != nil {
+		return err
 	}
-	return mergeConversationHistoryForSync(conversation, resp), nil
+	if len(heldMessageIDs) > 0 {
+		// Held messages were deliberately not handed to bridgev2. Keep the
+		// durable head unchanged so this fetch is retried without losing them.
+		return &outboundReconciliationDeferredError{messageCount: len(heldMessageIDs)}
+	}
+	if fetchedHeadMessageID == "" {
+		return nil
+	}
+	if !validRemoteID(fetchedHeadMessageID) {
+		return fmt.Errorf("tumblr conversation sync boundary is invalid")
+	}
+	if tc == nil || tc.connector == nil || tc.connector.DB == nil || tc.userLogin == nil {
+		return fmt.Errorf("tumblr durable sync database is unavailable")
+	}
+	// Keep this as the final durable write: retries may repeat work, but they
+	// can never skip over a fetched message that was not confirmed in Matrix.
+	if err := tc.connector.DB.ConversationSync.SetCompletedHead(
+		ctx,
+		tc.userLogin.ID,
+		conversation.ID,
+		fetchedHeadMessageID,
+		time.Now(),
+	); err != nil {
+		return fmt.Errorf("failed to save Tumblr conversation sync boundary: %w", err)
+	}
+	return nil
+}
+
+func (tc *TumblrClient) confirmFetchedConversationMessagesStored(
+	ctx context.Context,
+	conversation tumblr.Conversation,
+	heldMessageIDs map[string]struct{},
+) error {
+	portalKey := tc.portalKey(conversation.ID)
+	seenIDs := make(map[string]struct{}, len(conversation.Messages.Data))
+	for _, message := range conversation.Messages.Data {
+		if !validRemoteID(message.ID) {
+			return fmt.Errorf("fetched Tumblr conversation contains an invalid message ID")
+		}
+		if _, duplicate := seenIDs[message.ID]; duplicate {
+			continue
+		}
+		seenIDs[message.ID] = struct{}{}
+		if _, held := heldMessageIDs[message.ID]; held {
+			// queueFetchedConversation returns a typed retry error for these IDs
+			// before it can advance the durable conversation head.
+			continue
+		}
+		if err := tc.confirmTumblrMessageStored(ctx, portalKey, message.ID); err != nil {
+			return fmt.Errorf("failed to confirm fetched Tumblr conversation was stored: %w", err)
+		}
+	}
+	return nil
 }
 
 func mergeConversationHistoryForSync(listConversation tumblr.Conversation, history *tumblr.ConversationMessagesResponse) tumblr.Conversation {
@@ -203,44 +374,252 @@ func mergeConversationHistoryForSync(listConversation tumblr.Conversation, histo
 	return merged
 }
 
-func (tc *TumblrClient) queueConversation(ctx context.Context, conversation tumblr.Conversation, forceChatResync bool) {
+func (tc *TumblrClient) queueConversation(
+	ctx context.Context,
+	conversation tumblr.Conversation,
+	forceChatResync bool,
+) (map[string]struct{}, error) {
 	if !validRemoteID(conversation.ID) {
-		return
+		return nil, fmt.Errorf("tumblr conversation ID is invalid")
+	}
+	reconciliation, err := tc.reconcileOutboundConversation(ctx, &conversation)
+	if err != nil {
+		return nil, fmt.Errorf("failed to reconcile Tumblr outbound messages: %w", err)
 	}
 	firstSeen, newMessages := tc.markConversationSeen(conversation)
 	portalKey := tc.portalKey(conversation.ID)
-	metadataChanged := tc.saveConversationMetadataIfChanged(ctx, portalKey, conversation)
 	fallbackTimestamp := time.Now()
-	latest := latestConversationTimeWithFallback(conversation, fallbackTimestamp)
-	if forceChatResync || firstSeen || metadataChanged {
-		tc.queueRemoteEvent(tc.chatResyncEventFromConversation(conversation, portalKey, latest))
+	messages, err := tc.messagesForConversationSync(ctx, portalKey, conversation, firstSeen, forceChatResync, newMessages)
+	if err != nil {
+		return nil, err
 	}
-	if readReceipt := tc.readReceiptEventFromConversation(conversation, portalKey, fallbackTimestamp); readReceipt != nil &&
-		tc.markConversationReadTimestampSeen(conversation.ID, conversation.LastReadTimestamp) {
-		tc.queueRemoteEvent(readReceipt)
+	readReceipt := tc.readReceiptEventFromConversation(conversation, portalKey, fallbackTimestamp)
+
+	if err = tc.ensureConversationPortalForSync(
+		ctx,
+		portalKey,
+		conversation,
+		forceChatResync || firstSeen,
+	); err != nil {
+		return nil, err
 	}
-	for _, message := range tc.messagesForConversationSync(ctx, portalKey, conversation, firstSeen, forceChatResync, newMessages) {
-		tc.queueMessageWithFallback(portalKey, message, false, fallbackTimestamp)
+	if err = tc.queueConversationMessageChain(
+		ctx,
+		portalKey,
+		messages,
+		readReceipt,
+		fallbackTimestamp,
+		reconciliation.transactions,
+	); err != nil {
+		return nil, err
+	}
+	return reconciliation.heldMessageIDs, nil
+}
+
+func (tc *TumblrClient) ensureConversationPortalForSync(
+	ctx context.Context,
+	portalKey networkid.PortalKey,
+	conversation tumblr.Conversation,
+	forceResync bool,
+) error {
+	return tc.withPortalMutationLock(ctx, func() error {
+		// Portal identity is committed synchronously while coordinated. Framework
+		// queue callbacks are never awaited under a Tumblr-owned lock. Ignoring the
+		// caller's cancellation keeps the identity update atomic, while the deadline
+		// guarantees a stalled dependency cannot strand the coordinator forever.
+		mutationCtx, cancelMutation := context.WithTimeout(
+			context.WithoutCancel(ctx),
+			tumblrPortalMutationTimeout,
+		)
+		defer cancelMutation()
+		persisted, err := tc.connector.Bridge.DB.Portal.GetByKey(mutationCtx, portalKey)
+		if err != nil {
+			return fmt.Errorf("failed to load persisted Tumblr portal before chat sync: %w", err)
+		}
+		portal, err := tc.loadPortalWithPersistedParity(mutationCtx, portalKey, persisted)
+		if err != nil {
+			return fmt.Errorf("failed to verify Tumblr portal cache before chat sync: %w", err)
+		}
+		if portal == nil {
+			portal, err = tc.connector.Bridge.GetPortalByKey(mutationCtx, portalKey)
+			if err != nil {
+				return fmt.Errorf("failed to create Tumblr portal before chat sync: %w", err)
+			}
+		}
+		if portal == nil || portal.Portal == nil || portal.PortalKey != portalKey {
+			return fmt.Errorf("tumblr portal is unavailable before chat sync")
+		}
+		// A direct UserPortal deletion cannot invalidate bridgev2's private
+		// per-login cache. Recreate durable ownership explicitly for every live
+		// Tumblr fetch so a conversation can always return in the same process.
+		if _, err = tc.connector.Bridge.DB.UserPortal.GetOrCreate(
+			mutationCtx,
+			tc.userLogin.UserLogin,
+			portalKey,
+		); err != nil {
+			return fmt.Errorf("failed to restore Tumblr login portal before chat sync: %w", err)
+		}
+		metadataChanged, err := tc.saveConversationMetadataIfChangedLocked(
+			mutationCtx,
+			portal,
+			conversation,
+			tc.conversationParticipantHash(conversation),
+		)
+		if err != nil {
+			return err
+		}
+		if portal.MXID == "" {
+			if err = portal.CreateMatrixRoom(mutationCtx, tc.userLogin, tc.chatInfoFromConversation(conversation)); err != nil {
+				return fmt.Errorf("failed to create Tumblr conversation room: %w", err)
+			}
+			return tc.confirmTumblrPortalExists(mutationCtx, portalKey)
+		}
+		if !forceResync && !metadataChanged {
+			return nil
+		}
+		portal.UpdateInfo(mutationCtx, tc.chatInfoFromConversation(conversation), tc.userLogin, nil, time.Time{})
+		if err = mutationCtx.Err(); err != nil {
+			return fmt.Errorf("timed out updating Tumblr conversation room: %w", err)
+		}
+		if err = portal.Save(mutationCtx); err != nil {
+			return fmt.Errorf("failed to save updated Tumblr conversation room: %w", err)
+		}
+		return tc.confirmTumblrPortalExists(mutationCtx, portalKey)
+	})
+}
+
+func (tc *TumblrClient) queueConversationMessageChain(
+	ctx context.Context,
+	portalKey networkid.PortalKey,
+	messages []tumblr.Message,
+	readReceipt *simplevent.Receipt,
+	fallbackTimestamp time.Time,
+	outboundTransactions map[string]networkid.TransactionID,
+) error {
+	deliveryCtx, cancelDelivery := context.WithTimeout(ctx, tumblrRemoteDeliveryTimeout)
+	defer cancelDelivery()
+	for _, message := range messages {
+		if err := deliveryCtx.Err(); err != nil {
+			return err
+		}
+		evt := tc.messageEventFromMessageWithTransaction(
+			portalKey,
+			message,
+			false,
+			fallbackTimestamp,
+			outboundTransactions[message.ID],
+		)
+		if evt == nil {
+			return fmt.Errorf("tumblr message has an invalid ID")
+		}
+		result := tc.queueRemoteEvent(evt)
+		if err := remoteEventQueueError(result, "tumblr message"); err != nil && !result.Ignored {
+			return err
+		}
+		// The durable message row is the completion signal. Polling it avoids
+		// depending on PostHandle, which bridgev2 does not call after every panic.
+		if err := tc.waitForTumblrMessageStored(deliveryCtx, portalKey, message.ID); err != nil {
+			return err
+		}
+	}
+	if readReceipt == nil {
+		return nil
+	}
+	if err := deliveryCtx.Err(); err != nil {
+		return err
+	}
+	result := tc.queueRemoteEvent(readReceipt)
+	if err := remoteEventQueueError(result, "tumblr read receipt"); err != nil && !result.Ignored {
+		return err
+	}
+	return nil
+}
+
+func (tc *TumblrClient) confirmTumblrPortalExists(ctx context.Context, portalKey networkid.PortalKey) error {
+	if tc == nil || tc.connector == nil || tc.connector.Bridge == nil || tc.connector.Bridge.DB == nil {
+		return fmt.Errorf("tumblr bridge is unavailable")
+	}
+	persisted, err := tc.connector.Bridge.DB.Portal.GetByKey(ctx, portalKey)
+	if err != nil {
+		return fmt.Errorf("failed to load persisted Tumblr portal: %w", err)
+	}
+	portal, err := tc.loadPortalWithPersistedParity(ctx, portalKey, persisted)
+	if err != nil {
+		return fmt.Errorf("failed to verify Tumblr portal cache: %w", err)
+	}
+	if portal == nil || portal.Portal == nil || portal.MXID == "" {
+		return fmt.Errorf("tumblr portal does not exist")
+	}
+	return nil
+}
+
+func (tc *TumblrClient) confirmTumblrMessageStored(ctx context.Context, portalKey networkid.PortalKey, messageID string) error {
+	stored, err := tc.tumblrMessageStored(ctx, portalKey, messageID)
+	if err != nil {
+		return err
+	}
+	if !stored {
+		return fmt.Errorf("tumblr message was not stored after handling")
+	}
+	return nil
+}
+
+func (tc *TumblrClient) waitForTumblrMessageStored(
+	ctx context.Context,
+	portalKey networkid.PortalKey,
+	messageID string,
+) error {
+	ticker := time.NewTicker(tumblrRemoteDeliveryPoll)
+	defer ticker.Stop()
+	for {
+		stored, err := tc.tumblrMessageStored(ctx, portalKey, messageID)
+		if err != nil {
+			return err
+		}
+		if stored {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timed out waiting for Tumblr message delivery: %w", ctx.Err())
+		case <-ticker.C:
+		}
 	}
 }
 
-func (tc *TumblrClient) chatResyncEventFromConversation(conversation tumblr.Conversation, portalKey networkid.PortalKey, latest time.Time) *simplevent.ChatResync {
-	return &simplevent.ChatResync{
-		EventMeta: simplevent.EventMeta{
-			Type:         bridgev2.RemoteEventChatResync,
-			PortalKey:    portalKey,
-			CreatePortal: true,
-			Sender:       tc.loginEventSender(),
-			Timestamp:    latest,
-			StreamOrder:  latest.UnixMilli(),
-			LogContext: func(c zerolog.Context) zerolog.Context {
-				return c.Str("conversation_id_hash", logIdentifierHash(conversation.ID))
-			},
-		},
-		ChatInfo:            tc.chatInfoFromConversation(conversation),
-		LatestMessageTS:     latest,
-		BundledBackfillData: bundledBackfillMessages(conversation.Messages.Data),
+func (tc *TumblrClient) tumblrMessageStored(
+	ctx context.Context,
+	portalKey networkid.PortalKey,
+	messageID string,
+) (bool, error) {
+	if tc == nil || tc.connector == nil || tc.connector.Bridge == nil || tc.connector.Bridge.DB == nil {
+		return false, fmt.Errorf("tumblr message database is unavailable")
 	}
+	existing, err := tc.connector.Bridge.DB.Message.GetFirstPartByID(
+		ctx,
+		portalKey.Receiver,
+		tumblrid.MakeMessageID(messageID),
+	)
+	if err != nil {
+		return false, fmt.Errorf("failed to confirm Tumblr message delivery: %w", err)
+	}
+	if existing == nil {
+		return false, nil
+	}
+	if existing.Room != portalKey {
+		return false, fmt.Errorf("tumblr message was stored in a different conversation")
+	}
+	return true, nil
+}
+
+func remoteEventQueueError(result bridgev2.EventHandlingResult, description string) error {
+	if result.Success && !result.Ignored {
+		return nil
+	}
+	if result.Error != nil {
+		return fmt.Errorf("%s was not accepted: %w", description, result.Error)
+	}
+	return fmt.Errorf("%s was not accepted", description)
 }
 
 func (tc *TumblrClient) readReceiptEventFromConversation(conversation tumblr.Conversation, portalKey networkid.PortalKey, fallbackTimestamp time.Time) *simplevent.Receipt {
@@ -267,26 +646,16 @@ func (tc *TumblrClient) readReceiptEventFromConversation(conversation tumblr.Con
 	}
 }
 
-func (tc *TumblrClient) messagesForConversationSync(ctx context.Context, portalKey networkid.PortalKey, conversation tumblr.Conversation, firstSeen, forceChatResync bool, newMessages []tumblr.Message) []tumblr.Message {
+func (tc *TumblrClient) messagesForConversationSync(ctx context.Context, portalKey networkid.PortalKey, conversation tumblr.Conversation, firstSeen, forceChatResync bool, newMessages []tumblr.Message) ([]tumblr.Message, error) {
 	if firstSeen || forceChatResync {
 		return tc.missingConversationMessages(ctx, portalKey, conversation)
 	}
-	return newMessages
+	return newMessages, nil
 }
 
-func (tc *TumblrClient) missingConversationMessages(ctx context.Context, portalKey networkid.PortalKey, conversation tumblr.Conversation) []tumblr.Message {
+func (tc *TumblrClient) missingConversationMessages(ctx context.Context, portalKey networkid.PortalKey, conversation tumblr.Conversation) ([]tumblr.Message, error) {
 	if tc == nil || tc.connector == nil || tc.connector.Bridge == nil || tc.connector.Bridge.DB == nil {
-		return nil
-	}
-	portal, err := tc.connector.Bridge.GetExistingPortalByKey(ctx, portalKey)
-	if err != nil {
-		if log := tc.log(); log != nil {
-			log.Warn().Err(err).Str("conversation_id_hash", logIdentifierHash(conversation.ID)).Msg("Failed to load portal while checking for missing Tumblr messages")
-		}
-		return nil
-	}
-	if portal == nil || portal.Portal == nil || portal.MXID == "" {
-		return nil
+		return nil, fmt.Errorf("tumblr message database is unavailable")
 	}
 	missing := make([]tumblr.Message, 0)
 	for _, message := range sortedMessages(conversation.Messages.Data) {
@@ -295,13 +664,7 @@ func (tc *TumblrClient) missingConversationMessages(ctx context.Context, portalK
 		}
 		existing, err := tc.connector.Bridge.DB.Message.GetFirstPartByID(ctx, portalKey.Receiver, tumblrid.MakeMessageID(message.ID))
 		if err != nil {
-			if log := tc.log(); log != nil {
-				log.Warn().Err(err).
-					Str("conversation_id_hash", logIdentifierHash(conversation.ID)).
-					Str("message_id_hash", logIdentifierHash(message.ID)).
-					Msg("Failed to check if Tumblr message already exists")
-			}
-			continue
+			return nil, fmt.Errorf("failed to check if Tumblr message already exists: %w", err)
 		}
 		if existing == nil {
 			missing = append(missing, message)
@@ -312,45 +675,7 @@ func (tc *TumblrClient) missingConversationMessages(ctx context.Context, portalK
 			log.Info().Int("message_count", len(missing)).Str("conversation_id_hash", logIdentifierHash(conversation.ID)).Msg("Queueing missing Tumblr messages from hydrated conversation")
 		}
 	}
-	return missing
-}
-
-func bundledBackfillMessages(messages []tumblr.Message) []tumblr.Message {
-	if len(messages) == 0 {
-		return nil
-	}
-	copied := make([]tumblr.Message, len(messages))
-	for i, message := range messages {
-		copied[i] = copyTumblrMessage(message)
-	}
-	return copied
-}
-
-func copyTumblrMessage(message tumblr.Message) tumblr.Message {
-	copied := message
-	if message.Participant != nil {
-		participant := copyTumblrBlog(*message.Participant)
-		copied.Participant = &participant
-	}
-	if message.Content != nil {
-		content := *message.Content
-		copied.Content = &content
-	}
-	if message.Post != nil {
-		post := *message.Post
-		copied.Post = &post
-	}
-	return copied
-}
-
-func copyTumblrBlog(blog tumblr.Blog) tumblr.Blog {
-	copied := blog
-	copied.Avatar = append([]tumblr.ImageAsset(nil), blog.Avatar...)
-	if blog.Theme != nil {
-		theme := *blog.Theme
-		copied.Theme = &theme
-	}
-	return copied
+	return missing, nil
 }
 
 func (tc *TumblrClient) markConversationSeen(conversation tumblr.Conversation) (firstSeen bool, newMessages []tumblr.Message) {
@@ -404,19 +729,6 @@ func (tc *TumblrClient) markConversationMessagesSeen(conversationID string, mess
 	}
 }
 
-func (tc *TumblrClient) markConversationReadTimestampSeen(conversationID string, timestamp int64) bool {
-	if !validRemoteID(conversationID) || timestamp <= 0 {
-		return false
-	}
-	tc.seenLock.Lock()
-	defer tc.seenLock.Unlock()
-	if previous := tc.seenReadTS[conversationID]; previous >= timestamp {
-		return false
-	}
-	tc.seenReadTS[conversationID] = timestamp
-	return true
-}
-
 func (tc *TumblrClient) isMessageSeenLocked(cacheKey, messageID string) bool {
 	if _, ok := tc.seenMessages[cacheKey]; ok {
 		return true
@@ -456,23 +768,18 @@ func sortedMessagesWithReference(messages []tumblr.Message, reference time.Time)
 	sort.SliceStable(sorted, func(i, j int) bool {
 		left := messageSortTimestampWithReference(sorted[i], reference)
 		right := messageSortTimestampWithReference(sorted[j], reference)
-		if left.Equal(right) {
-			return sorted[i].ID < sorted[j].ID
-		}
 		return left.Before(right)
 	})
 	return sorted
 }
 
-func (tc *TumblrClient) queueMessageWithFallback(portalKey networkid.PortalKey, message tumblr.Message, createPortal bool, fallbackTimestamp time.Time) {
-	evt := tc.messageEventFromMessage(portalKey, message, createPortal, fallbackTimestamp)
-	if evt == nil {
-		return
-	}
-	tc.queueRemoteEvent(evt)
-}
-
-func (tc *TumblrClient) messageEventFromMessage(portalKey networkid.PortalKey, message tumblr.Message, createPortal bool, fallbackTimestamp time.Time) *simplevent.Message[tumblr.Message] {
+func (tc *TumblrClient) messageEventFromMessageWithTransaction(
+	portalKey networkid.PortalKey,
+	message tumblr.Message,
+	createPortal bool,
+	fallbackTimestamp time.Time,
+	transactionID networkid.TransactionID,
+) *simplevent.Message[tumblr.Message] {
 	if !validRemoteID(message.ID) {
 		return nil
 	}
@@ -493,102 +800,12 @@ func (tc *TumblrClient) messageEventFromMessage(portalKey networkid.PortalKey, m
 			},
 		},
 		ID:            tumblrid.MakeMessageID(message.ID),
-		TransactionID: networkid.TransactionID(message.ID),
+		TransactionID: transactionID,
 		Data:          message,
 		ConvertMessageFunc: func(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, data tumblr.Message) (*bridgev2.ConvertedMessage, error) {
 			return tc.convertTumblrMessageWithMedia(ctx, portal, intent, data)
 		},
 	}
-}
-
-func (tc *TumblrClient) convertTumblrMessageWithMedia(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, message tumblr.Message) (*bridgev2.ConvertedMessage, error) {
-	if !msgconv.CanUseImageMedia(message) {
-		return tc.convertTumblrMessage(message), nil
-	}
-	part, err := tc.convertTumblrImageMessage(ctx, portal, intent, message)
-	if err != nil {
-		if log := tc.log(); log != nil {
-			log.Warn().Err(err).
-				Str("message_id_hash", logIdentifierHash(message.ID)).
-				Str("message_type", logMessageType(message.Type)).
-				Msg("Falling back to Tumblr media notice after Matrix upload failed")
-		}
-		return tc.convertTumblrMessage(message), nil
-	}
-	if part == nil {
-		return tc.convertTumblrMessage(message), nil
-	}
-	return &bridgev2.ConvertedMessage{
-		Parts: []*bridgev2.ConvertedMessagePart{part},
-	}, nil
-}
-
-func messageCanUseImageMedia(message tumblr.Message) bool {
-	return msgconv.CanUseImageMedia(message)
-}
-
-func (tc *TumblrClient) convertTumblrImageMessage(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, message tumblr.Message) (*bridgev2.ConvertedMessagePart, error) {
-	image := message.BestImage()
-	if image == nil || strings.TrimSpace(image.URL) == "" {
-		return nil, nil
-	}
-	if intent == nil {
-		return nil, fmt.Errorf("matrix media uploader is not available")
-	}
-	client, err := tc.tumblrClient()
-	if err != nil {
-		return nil, err
-	}
-	data, err := client.Download(ctx, image.URL, tumblr.DefaultMaxDownloadBytes)
-	if err != nil {
-		return nil, err
-	}
-	mimeType := http.DetectContentType(data)
-	fileName := tumblrImageFileName(mimeType)
-	var roomID id.RoomID
-	if portal != nil && portal.Portal != nil {
-		roomID = portal.MXID
-	}
-	mxc, file, err := intent.UploadMedia(ctx, roomID, data, fileName, mimeType)
-	if err != nil {
-		return nil, fmt.Errorf("failed to upload Tumblr image to Matrix: %w", err)
-	}
-	info := &event.FileInfo{
-		MimeType: mimeType,
-		Size:     len(data),
-		Width:    image.Width,
-		Height:   image.Height,
-	}
-	if mimeType == "image/gif" {
-		info.IsAnimated = true
-		info.MauGIF = true
-	}
-	eventType := event.EventMessage
-	msgType := event.MsgImage
-	if message.Type == tumblr.MessageTypeSticker {
-		eventType = event.EventSticker
-		msgType = event.CapMsgSticker
-	}
-	return &bridgev2.ConvertedMessagePart{
-		Type: eventType,
-		Content: &event.MessageEventContent{
-			MsgType:  msgType,
-			Body:     fileName,
-			FileName: fileName,
-			URL:      mxc,
-			File:     file,
-			Info:     info,
-		},
-		DBMetadata: &MessageMetadata{Type: msgconv.MessageMetadataType(message.Type)},
-	}, nil
-}
-
-func tumblrImageFileName(mimeType string) string {
-	extensions, _ := mime.ExtensionsByType(mimeType)
-	if len(extensions) > 0 {
-		return "tumblr-image" + extensions[0]
-	}
-	return "tumblr-image"
 }
 
 func (tc *TumblrClient) convertTumblrMessage(message tumblr.Message) *bridgev2.ConvertedMessage {
@@ -653,33 +870,35 @@ func applyConversationPortalMetadata(portal *bridgev2.Portal, conversationID, pa
 	return changed
 }
 
-func (tc *TumblrClient) saveConversationMetadataIfChanged(ctx context.Context, portalKey networkid.PortalKey, conversation tumblr.Conversation) bool {
-	if tc == nil || tc.connector == nil || tc.connector.Bridge == nil || tc.connector.Bridge.DB == nil {
-		return false
+func (tc *TumblrClient) saveConversationMetadataIfChangedLocked(
+	ctx context.Context,
+	portal *bridgev2.Portal,
+	conversation tumblr.Conversation,
+	participantHash string,
+) (bool, error) {
+	if participantHash == "" || portal == nil || portal.Portal == nil {
+		return false, nil
 	}
-	participantHash := tc.conversationParticipantHash(conversation)
-	if participantHash == "" {
-		return false
-	}
-	portal, err := tc.connector.Bridge.GetExistingPortalByKey(ctx, portalKey)
-	if err != nil {
-		if log := tc.log(); log != nil {
-			log.Warn().Err(err).Str("conversation_id_hash", logIdentifierHash(conversation.ID)).Msg("Failed to load Tumblr portal metadata for participant sync")
-		}
-		return false
-	}
-	if portal == nil || portal.Portal == nil {
-		return false
+	originalMetadata := portal.Metadata
+	existingMetadata, hadExistingMetadata := originalMetadata.(*PortalMetadata)
+	var originalMetadataValue PortalMetadata
+	if hadExistingMetadata && existingMetadata != nil {
+		originalMetadataValue = *existingMetadata
+		originalMetadataValue.PendingParticipantIDs = append([]string(nil), existingMetadata.PendingParticipantIDs...)
 	}
 	if !applyConversationPortalMetadata(portal, conversation.ID, participantHash) {
-		return false
+		return false, nil
 	}
 	if err := portal.Save(ctx); err != nil {
-		if log := tc.log(); log != nil {
-			log.Warn().Err(err).Str("conversation_id_hash", logIdentifierHash(conversation.ID)).Msg("Failed to save Tumblr portal participant metadata")
+		if hadExistingMetadata && existingMetadata != nil {
+			*existingMetadata = originalMetadataValue
+			portal.Metadata = existingMetadata
+		} else {
+			portal.Metadata = originalMetadata
 		}
+		return false, fmt.Errorf("failed to save Tumblr portal participant metadata: %w", err)
 	}
-	return true
+	return true, nil
 }
 
 func (tc *TumblrClient) conversationParticipantHash(conversation tumblr.Conversation) string {
@@ -817,20 +1036,6 @@ func truncateConversationTitle(title string) string {
 	return string(runes[:maxConversationTitleRunes]) + displayNameTruncation
 }
 
-func latestConversationTimeWithFallback(conversation tumblr.Conversation, fallback time.Time) time.Time {
-	latest := time.Time{}
-	for _, message := range conversation.Messages.Data {
-		ts := messageSortTimestampWithReference(message, fallback)
-		if ts.After(latest) {
-			latest = ts
-		}
-	}
-	if latest.IsZero() {
-		latest = nonZeroFallbackTime(fallback)
-	}
-	return latest
-}
-
 func messageTimestampWithFallback(message tumblr.Message, fallback time.Time) time.Time {
 	fallback = nonZeroFallbackTime(fallback)
 	if ts, ok := saneTumblrTimestamp(message.Timestamp, fallback); ok {
@@ -877,8 +1082,11 @@ func (tc *TumblrClient) portalKey(conversationID string) networkid.PortalKey {
 	if tc.userLogin != nil {
 		loginID = tc.userLogin.ID
 	}
-	splitPortals := tc.connector != nil && tc.connector.Bridge != nil && tc.connector.Bridge.Config != nil && tc.connector.Bridge.Config.SplitPortals
-	return tumblrid.MakePortalKey(conversationID, loginID, splitPortals)
+	// Tumblr only exposes one-to-one conversations. Match the WhatsApp bridge's
+	// DM invariant and always scope a portal to the connected login, independent
+	// of the global split-portals setting. Deleting a conversation can therefore
+	// never detach or preserve another Tumblr account's room by mistake.
+	return tumblrid.MakePortalKey(conversationID, loginID)
 }
 
 func (tc *TumblrClient) loginEventSender() bridgev2.EventSender {

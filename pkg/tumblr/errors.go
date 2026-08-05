@@ -32,6 +32,37 @@ type Error struct {
 	Body       string
 }
 
+// MessageSendError records whether Tumblr definitely rejected a message or
+// whether the request may have reached Tumblr without a usable acknowledgement.
+// Callers must never replay a send with an unknown outcome.
+type MessageSendError struct {
+	Err              error
+	Definite         bool
+	authRefreshError error
+}
+
+func (e *MessageSendError) Error() string {
+	if e == nil || e.Err == nil {
+		return "tumblr message send failed"
+	}
+	return e.Err.Error()
+}
+
+func (e *MessageSendError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	if e.authRefreshError != nil {
+		return errors.Join(e.Err, e.authRefreshError)
+	}
+	return e.Err
+}
+
+func IsMessageSendOutcomeUnknown(err error) bool {
+	var sendErr *MessageSendError
+	return errors.As(err, &sendErr) && !sendErr.Definite
+}
+
 func (e *Error) Error() string {
 	if e == nil {
 		return "tumblr API returned an empty error"
@@ -56,7 +87,7 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("tumblr API returned %d", e.StatusCode)
 }
 
-func (e *Error) IsAuthError() bool {
+func (e *Error) IsSessionInvalid() bool {
 	if e == nil {
 		return false
 	}
@@ -71,8 +102,12 @@ func (e *Error) IsAuthError() bool {
 	return false
 }
 
-func (e *Error) IsAuthRefreshCandidate() bool {
-	return e != nil && (e.IsAuthError() || e.StatusCode == http.StatusForbidden)
+func (e *Error) IsAuthError() bool {
+	return e.IsSessionInvalid()
+}
+
+func (e *Error) IsForbidden() bool {
+	return e != nil && e.StatusCode == http.StatusForbidden && !e.IsSessionInvalid()
 }
 
 func (e *Error) IsNotFound() bool {
@@ -83,17 +118,41 @@ func (e *Error) IsNotFound() bool {
 }
 
 func IsAuthError(err error) bool {
+	return IsSessionInvalid(err)
+}
+
+func IsSessionInvalid(err error) bool {
+	var sendErr *MessageSendError
+	if errors.As(err, &sendErr) && sendErr.authRefreshError != nil {
+		// The rejected send describes credentials that were already replaced.
+		// Only the refresh result can describe the session we have now.
+		return IsSessionInvalid(sendErr.authRefreshError)
+	}
 	var apiErr *Error
-	if errors.As(err, &apiErr) && apiErr.IsAuthError() {
+	if errors.As(err, &apiErr) && apiErr.IsSessionInvalid() {
 		return true
 	}
 	var bootstrapErr *BootstrapError
 	return errors.As(err, &bootstrapErr) && bootstrapErr.IsAuthError()
 }
 
-func IsAuthRefreshCandidate(err error) bool {
+func IsForbidden(err error) bool {
 	var apiErr *Error
-	return errors.As(err, &apiErr) && apiErr.IsAuthRefreshCandidate()
+	return errors.As(err, &apiErr) && apiErr.IsForbidden()
+}
+
+func ShouldRefreshAuth(err error, mutating bool) bool {
+	var sendErr *MessageSendError
+	if errors.As(err, &sendErr) && sendErr.authRefreshError != nil {
+		return IsSessionInvalid(sendErr.authRefreshError) ||
+			(mutating && IsForbidden(sendErr.authRefreshError))
+	}
+	return IsSessionInvalid(err) || (mutating && IsForbidden(err))
+}
+
+func IsIncompleteSession(err error) bool {
+	var bootstrapErr *BootstrapError
+	return errors.As(err, &bootstrapErr) && bootstrapErr.IsIncompleteSession()
 }
 
 func IsNotFound(err error) bool {
@@ -102,8 +161,9 @@ func IsNotFound(err error) bool {
 }
 
 type BootstrapError struct {
-	Message string
-	Auth    bool
+	Message    string
+	Auth       bool
+	Incomplete bool
 }
 
 func (e *BootstrapError) Error() string {
@@ -115,6 +175,10 @@ func (e *BootstrapError) Error() string {
 
 func (e *BootstrapError) IsAuthError() bool {
 	return e != nil && e.Auth
+}
+
+func (e *BootstrapError) IsIncompleteSession() bool {
+	return e != nil && e.Incomplete
 }
 
 func safeErrorDetail(input string) string {

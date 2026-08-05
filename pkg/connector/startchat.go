@@ -23,6 +23,11 @@ func (tc *TumblrClient) ResolveIdentifier(ctx context.Context, identifier string
 	if normalized == "" {
 		return nil, errors.New("blog name is empty")
 	}
+	if createChat {
+		return nil, bridgev2.RespError(mautrix.MUnrecognized.WithMessage(
+			"Starting new Tumblr chats from Beeper is not available yet",
+		))
+	}
 	if !tc.IsLoggedIn() {
 		return nil, bridgev2.ErrNotLoggedIn
 	}
@@ -43,16 +48,7 @@ func (tc *TumblrClient) ResolveIdentifier(ctx context.Context, identifier string
 	if resp == nil || resp.Blog == nil || tumblrBlogUserID(*resp.Blog) == "" {
 		return nil, nil
 	}
-	resolveResp, err := tc.resolveResponseForBlog(ctx, *resp.Blog)
-	if err != nil || resolveResp == nil || !createChat {
-		return resolveResp, err
-	}
-	chat, err := tc.createDMResponseForBlog(ctx, normalized, *resp.Blog)
-	if err != nil {
-		return nil, err
-	}
-	resolveResp.Chat = chat
-	return resolveResp, nil
+	return tc.resolveResponseForBlog(ctx, *resp.Blog)
 }
 
 func (tc *TumblrClient) SearchUsers(ctx context.Context, query string) ([]*bridgev2.ResolveIdentifierResponse, error) {
@@ -118,39 +114,6 @@ func (tc *TumblrClient) hydrateSuggestionBlog(ctx context.Context, client *tumbl
 	return *resp.Blog, nil
 }
 
-func (tc *TumblrClient) createDMResponseForBlog(ctx context.Context, targetBlogName string, blog tumblr.Blog) (*bridgev2.CreateChatResponse, error) {
-	meta, err := tc.validatedLoginMetadata()
-	if err != nil {
-		return nil, err
-	}
-	targetUserID := tumblrBlogUserID(blog)
-	targetParticipantID := strings.TrimSpace(blog.UUID)
-	if !validRemoteID(targetParticipantID) {
-		return nil, bridgev2.RespError(mautrix.MForbidden.WithMessage(
-			"Tumblr did not return the UUID needed to start this DM",
-		))
-	}
-	client, err := tc.tumblrClient()
-	if err != nil {
-		return nil, err
-	}
-	if existing, err := client.GetConversationByParticipants(ctx, meta.SelectedBlogName, targetBlogName, 1); err == nil {
-		if existing != nil && existing.Conversation != nil && validRemoteID(existing.Conversation.ID) {
-			return &bridgev2.CreateChatResponse{
-				PortalKey:  tc.portalKey(existing.Conversation.ID),
-				PortalInfo: tc.chatInfoFromConversation(*existing.Conversation),
-			}, nil
-		}
-	} else if !tumblr.IsNotFound(err) {
-		return nil, tc.handleRemoteError(err)
-	}
-	participantIDs := []string{targetParticipantID, meta.SelectedBlogUUID}
-	return &bridgev2.CreateChatResponse{
-		PortalKey:  tc.pendingDMPortalKey(participantIDs),
-		PortalInfo: tc.pendingDMChatInfo(blog, participantIDs, targetBlogName, targetUserID),
-	}, nil
-}
-
 func (tc *TumblrClient) resolveResponseForBlog(ctx context.Context, blog tumblr.Blog) (*bridgev2.ResolveIdentifierResponse, error) {
 	userID := tumblrBlogUserID(blog)
 	if userID == "" {
@@ -181,41 +144,6 @@ const pendingDMPortalPrefix = "pending-dm:"
 
 func isPendingDMPortalID(portalID string) bool {
 	return strings.HasPrefix(portalID, pendingDMPortalPrefix)
-}
-
-func (tc *TumblrClient) pendingDMChatInfo(blog tumblr.Blog, participantIDs []string, targetBlogName string, targetUserID networkid.UserID) *bridgev2.ChatInfo {
-	conversation := tumblr.Conversation{
-		ID: string(tc.pendingDMPortalKey(participantIDs).ID),
-		Participants: []tumblr.Blog{
-			{
-				UUID: participantIDs[1],
-				Name: tc.selectedBlogName(),
-			},
-			blog,
-		},
-	}
-	info := tc.chatInfoFromConversation(conversation)
-	info.ExtraUpdates = func(_ context.Context, portal *bridgev2.Portal) bool {
-		if portal == nil || portal.Portal == nil {
-			return false
-		}
-		portal.Metadata = &PortalMetadata{
-			PendingParticipantIDs:  append([]string(nil), participantIDs...),
-			PendingParticipantName: targetBlogName,
-		}
-		if targetUserID != "" {
-			portal.OtherUserID = targetUserID
-		}
-		return true
-	}
-	return info
-}
-
-func (tc *TumblrClient) selectedBlogName() string {
-	if meta, err := tc.validatedLoginMetadata(); err == nil {
-		return meta.SelectedBlogName
-	}
-	return ""
 }
 
 func tumblrBlogUserID(blog tumblr.Blog) networkid.UserID {

@@ -30,10 +30,9 @@ func MakeMessageID(messageID string) networkid.MessageID {
 	return networkid.MessageID(messageID)
 }
 
-func MakePortalKey(conversationID string, loginID networkid.UserLoginID, splitPortals bool) networkid.PortalKey {
-	key := networkid.PortalKey{ID: MakePortalID(conversationID)}
-	if splitPortals {
-		key.Receiver = loginID
+func MakePortalKey(conversationID string, loginID networkid.UserLoginID) networkid.PortalKey {
+	return networkid.PortalKey{
+		ID:       MakePortalID(conversationID),
+		Receiver: loginID,
 	}
-	return key
 }

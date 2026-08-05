@@ -15,14 +15,13 @@ bridge updates.
 - Text send and receive.
 - Basic media send and receive.
 - Replies in existing Tumblr conversations from Beeper.
-- Read receipts, redactions, contact names, and avatars.
+- Read receipts, contact names, and avatars.
 - Backfill that preserves unread state.
 
 ## Known Limitations
 
 - Starting brand-new Tumblr chats from Beeper may depend on deeper Desktop
   support.
-- Group DMs may be incomplete.
 - Windows release binaries are not currently published.
 
 ## Setup
@@ -222,18 +221,41 @@ warning on macOS is harmless.
 
 ## Docker
 
+The Docker image uses the same Beeper registration as the native setup. Reuse
+the `BRIDGE_DIR`, `config.yaml`, and `registration.yaml` created in Setup. If
+you are starting with Docker instead, create and register them once before
+starting the container:
+
+```sh
+export BRIDGE_DIR="$HOME/.local/share/tumblr-dms"
+mkdir -p "$BRIDGE_DIR"
+bbctl config --type bridgev2 -o "$BRIDGE_DIR/config.yaml" sh-tumblrdms
+bbctl register -g -o "$BRIDGE_DIR/registration.yaml" sh-tumblrdms
+```
+
 Build the container:
 
 ```sh
 docker build -t tumblr-dms .
 ```
 
-Run it with a data directory:
+Run it as a named service that restarts after Docker or the host restarts:
 
 ```sh
-mkdir -p ./data
-docker run --rm -v "$PWD/data:/data" tumblr-dms
+docker run -d \
+  --name tumblr-dms \
+  --restart unless-stopped \
+  -v "$BRIDGE_DIR:/data" \
+  tumblr-dms
+docker logs -f tumblr-dms
 ```
+
+The container refuses to invent a local registration because that would not
+register the bridge with Beeper. It uses the mounted directory's numeric owner
+by default and only secures the directory plus the explicit config and
+registration files; it does not recursively change unrelated host files. Set
+`PUID` and `PGID` only when the container runtime does not preserve bind-mount
+ownership.
 
 ## Project Layout
 

@@ -23,7 +23,11 @@ func (tc *TumblrClient) blogAvatar(blog tumblr.Blog) *bridgev2.Avatar {
 			if tc == nil || tc.client == nil {
 				return nil, fmt.Errorf("tumblr client is not available for avatar download")
 			}
-			return tc.client.Download(ctx, avatarURL, tumblr.DefaultMaxDownloadBytes)
+			downloaded, err := tc.client.DownloadImage(ctx, avatarURL, tumblr.DefaultMaxDownloadBytes)
+			if err != nil {
+				return nil, err
+			}
+			return downloaded.Data, nil
 		},
 	}
 }
