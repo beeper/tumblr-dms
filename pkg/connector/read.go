@@ -12,6 +12,10 @@ var (
 )
 
 func (tc *TumblrClient) HandleMatrixReadReceipt(ctx context.Context, msg *bridgev2.MatrixReadReceipt) error {
+	if !tc.beginOwnedOperation() {
+		return bridgev2.ErrNotLoggedIn
+	}
+	defer tc.endOwnedOperation()
 	if msg == nil || msg.Portal == nil {
 		return nil
 	}
@@ -26,6 +30,10 @@ func (tc *TumblrClient) HandleMatrixReadReceipt(ctx context.Context, msg *bridge
 }
 
 func (tc *TumblrClient) HandleMatrixViewingChat(ctx context.Context, msg *bridgev2.MatrixViewingChat) error {
+	if !tc.beginOwnedOperation() {
+		return bridgev2.ErrNotLoggedIn
+	}
+	defer tc.endOwnedOperation()
 	if msg == nil || msg.Portal == nil {
 		return nil
 	}

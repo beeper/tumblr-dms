@@ -19,6 +19,10 @@ var _ bridgev2.IdentifierResolvingNetworkAPI = (*TumblrClient)(nil)
 var _ bridgev2.UserSearchingNetworkAPI = (*TumblrClient)(nil)
 
 func (tc *TumblrClient) ResolveIdentifier(ctx context.Context, identifier string, createChat bool) (*bridgev2.ResolveIdentifierResponse, error) {
+	if !tc.beginOwnedOperation() {
+		return nil, bridgev2.ErrNotLoggedIn
+	}
+	defer tc.endOwnedOperation()
 	normalized := tumblr.NormalizeBlogName(identifier)
 	if normalized == "" {
 		return nil, errors.New("blog name is empty")
@@ -52,6 +56,10 @@ func (tc *TumblrClient) ResolveIdentifier(ctx context.Context, identifier string
 }
 
 func (tc *TumblrClient) SearchUsers(ctx context.Context, query string) ([]*bridgev2.ResolveIdentifierResponse, error) {
+	if !tc.beginOwnedOperation() {
+		return nil, bridgev2.ErrNotLoggedIn
+	}
+	defer tc.endOwnedOperation()
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return nil, nil

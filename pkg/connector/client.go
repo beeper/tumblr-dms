@@ -577,6 +577,10 @@ func (tc *TumblrClient) LogoutRemote(ctx context.Context) {
 }
 
 func (tc *TumblrClient) IsThisUser(_ context.Context, userID networkid.UserID) bool {
+	if !tc.beginOwnedOperation() {
+		return false
+	}
+	defer tc.endOwnedOperation()
 	meta, err := tc.validatedLoginMetadata()
 	if err != nil {
 		return false
@@ -586,6 +590,10 @@ func (tc *TumblrClient) IsThisUser(_ context.Context, userID networkid.UserID) b
 }
 
 func (tc *TumblrClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
+	if !tc.beginOwnedOperation() {
+		return nil, bridgev2.ErrNotLoggedIn
+	}
+	defer tc.endOwnedOperation()
 	if portal == nil || portal.Portal == nil {
 		return nil, fmt.Errorf("portal is required to get Tumblr chat info")
 	}

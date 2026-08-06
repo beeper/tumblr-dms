@@ -37,6 +37,7 @@ Create a runtime directory:
 ```sh
 export BRIDGE_DIR="$HOME/.local/share/tumblr-dms"
 mkdir -p "$BRIDGE_DIR"
+chmod 700 "$BRIDGE_DIR"
 cd "$BRIDGE_DIR"
 ```
 
@@ -45,6 +46,7 @@ Register the bridge with Beeper:
 ```sh
 bbctl config --type bridgev2 -o config.yaml sh-tumblrdms
 bbctl register -g -o registration.yaml sh-tumblrdms
+chmod 600 config.yaml registration.yaml
 ```
 
 Download the bridge binary:
@@ -64,6 +66,8 @@ Use one of:
 Start the bridge:
 
 ```sh
+touch bridge.log
+chmod 600 bridge.log
 ./tumblr-dms -c config.yaml -r registration.yaml >> bridge.log 2>&1 &
 ```
 
@@ -107,6 +111,7 @@ What the assistant should do:
    ```sh
    export BRIDGE_DIR="$HOME/.local/share/tumblr-dms"
    mkdir -p "$BRIDGE_DIR"
+   chmod 700 "$BRIDGE_DIR"
    cd "$BRIDGE_DIR"
    ```
 
@@ -115,6 +120,7 @@ What the assistant should do:
    ```sh
    bbctl config --type bridgev2 -o config.yaml sh-tumblrdms
    bbctl register -g -o registration.yaml sh-tumblrdms
+   chmod 600 config.yaml registration.yaml
    ```
 
 6. Download the matching binary:
@@ -128,6 +134,8 @@ What the assistant should do:
 7. Start the bridge:
 
    ```sh
+   touch bridge.log
+   chmod 600 bridge.log
    ./tumblr-dms -c config.yaml -r registration.yaml >> bridge.log 2>&1 &
    ```
 
@@ -221,21 +229,27 @@ warning on macOS is harmless.
 
 ## Docker
 
-The Docker image uses the same Beeper registration as the native setup. Reuse
-the `BRIDGE_DIR`, `config.yaml`, and `registration.yaml` created in Setup. If
-you are starting with Docker instead, create and register them once before
-starting the container:
+Use Docker instead of the native start command above. Never run the native
+binary and Docker container at the same time against the same runtime
+directory. The Docker image uses the same Beeper registration, so you can
+reuse the `BRIDGE_DIR`, `config.yaml`, and `registration.yaml` after stopping
+the native process. If you are starting with Docker instead, create and
+register them once before starting the container:
 
 ```sh
 export BRIDGE_DIR="$HOME/.local/share/tumblr-dms"
 mkdir -p "$BRIDGE_DIR"
+chmod 700 "$BRIDGE_DIR"
 bbctl config --type bridgev2 -o "$BRIDGE_DIR/config.yaml" sh-tumblrdms
 bbctl register -g -o "$BRIDGE_DIR/registration.yaml" sh-tumblrdms
+chmod 600 "$BRIDGE_DIR/config.yaml" "$BRIDGE_DIR/registration.yaml"
 ```
 
-Build the container:
+Build the container from a source checkout, not from `BRIDGE_DIR`:
 
 ```sh
+git clone https://github.com/beeper/tumblr-dms.git
+cd tumblr-dms
 docker build -t tumblr-dms .
 ```
 
@@ -245,17 +259,18 @@ Run it as a named service that restarts after Docker or the host restarts:
 docker run -d \
   --name tumblr-dms \
   --restart unless-stopped \
+  --env UID="$(id -u)" \
+  --env GID="$(id -g)" \
   -v "$BRIDGE_DIR:/data" \
   tumblr-dms
 docker logs -f tumblr-dms
 ```
 
 The container refuses to invent a local registration because that would not
-register the bridge with Beeper. It uses the mounted directory's numeric owner
-by default and only secures the directory plus the explicit config and
-registration files; it does not recursively change unrelated host files. Set
-`PUID` and `PGID` only when the container runtime does not preserve bind-mount
-ownership.
+register the bridge with Beeper. Like other mautrix bridge images, it runs as
+UID/GID `1337` by default and prepares the dedicated `/data` runtime directory
+for that account. Set `UID` and `GID` when the bind mount uses a different
+numeric owner.
 
 ## Project Layout
 

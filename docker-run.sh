@@ -38,29 +38,19 @@ case "$resolved_data_dir" in
 esac
 DATA_DIR=$resolved_data_dir
 
-runtime_uid=${PUID:-}
-runtime_gid=${PGID:-}
-if [ -z "$runtime_uid" ]; then
-	runtime_uid=$(stat -c %u "$DATA_DIR")
-	if [ "$runtime_uid" = 0 ]; then
-		runtime_uid=1337
-	fi
-fi
-if [ -z "$runtime_gid" ]; then
-	runtime_gid=$(stat -c %g "$DATA_DIR")
-	if [ "$runtime_gid" = 0 ]; then
-		runtime_gid=$runtime_uid
-	fi
-fi
+# UID is the standard Mautrix container setting exported by the Dockerfile.
+# shellcheck disable=SC3028
+runtime_uid=${UID:-1337}
+runtime_gid=${GID:-$runtime_uid}
 case "$runtime_uid" in
 	"" | 0 | 0* | *[!0-9]*)
-		echo "PUID must be a non-zero numeric ID." >&2
+		echo "UID must be a non-zero numeric ID." >&2
 		exit 1
 		;;
 esac
 case "$runtime_gid" in
 	"" | 0 | 0* | *[!0-9]*)
-		echo "PGID must be a non-zero numeric ID." >&2
+		echo "GID must be a non-zero numeric ID." >&2
 		exit 1
 		;;
 esac
@@ -97,15 +87,9 @@ fi
 
 CONFIG_PATH=$(resolve_runtime_file config "$CONFIG_PATH")
 REGISTRATION_PATH=$(resolve_runtime_file registration "$REGISTRATION_PATH")
-chown "$runtime_uid:$runtime_gid" "$DATA_DIR"
+chown -R "$runtime_uid:$runtime_gid" "$DATA_DIR"
 chmod 0700 "$DATA_DIR"
-chown "$runtime_uid:$runtime_gid" "$CONFIG_PATH" "$REGISTRATION_PATH"
 chmod 0600 "$CONFIG_PATH" "$REGISTRATION_PATH"
 
 cd "$DATA_DIR"
-"$BINARY_NAME" repair-sqlite-ownership \
-	--config "$CONFIG_PATH" \
-	--data-dir "$DATA_DIR" \
-	--uid "$runtime_uid" \
-	--gid "$runtime_gid"
 exec su-exec "$runtime_uid:$runtime_gid" "$BINARY_NAME" -c "$CONFIG_PATH" -r "$REGISTRATION_PATH"

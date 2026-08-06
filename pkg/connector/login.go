@@ -310,6 +310,7 @@ func (tl *TumblrLogin) submitCookieInput(ctx context.Context, cookies map[string
 	if tl.override != nil && loginID != tl.override.ID {
 		return nil, tumblrReauthMismatchError("This sign-in returned a different Tumblr blog. Sign in to the account that owns the saved blog.")
 	}
+	var conflictingLogin *bridgev2.UserLogin
 	if replacementLogin == nil {
 		unlock := lockTumblrReauthentication(loginID)
 		defer unlock()
@@ -319,6 +320,8 @@ func (tl *TumblrLogin) submitCookieInput(ctx context.Context, cookies map[string
 		}
 		if existing != nil && existing.UserMXID == tl.User.MXID {
 			replacementLogin = existing
+		} else if existing != nil {
+			conflictingLogin = existing
 		}
 	}
 
@@ -343,6 +346,10 @@ func (tl *TumblrLogin) submitCookieInput(ctx context.Context, cookies map[string
 		}
 		previousRemoteName = replacementLogin.RemoteName
 		previousRemoteProfile = replacementLogin.RemoteProfile
+	} else if conflictingLogin != nil {
+		if oldClient, ok := conflictingLogin.Client.(*TumblrClient); ok {
+			oldClient.retireForReplacement()
+		}
 	}
 	userLogin, err := tl.User.NewLogin(
 		ctx,

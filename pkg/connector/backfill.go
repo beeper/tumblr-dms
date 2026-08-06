@@ -29,6 +29,10 @@ func (tc *TumblrClient) GetBackfillMaxBatchCount(_ context.Context, portal *brid
 }
 
 func (tc *TumblrClient) FetchMessages(ctx context.Context, params bridgev2.FetchMessagesParams) (*bridgev2.FetchMessagesResponse, error) {
+	if !tc.beginOwnedOperation() {
+		return nil, bridgev2.ErrNotLoggedIn
+	}
+	defer tc.endOwnedOperation()
 	if params.Portal == nil {
 		return &bridgev2.FetchMessagesResponse{HasMore: false}, nil
 	}

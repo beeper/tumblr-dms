@@ -1,9 +1,6 @@
 package main
 
 import (
-	"fmt"
-	"os"
-
 	"maunium.net/go/mautrix/bridgev2/matrix/mxmain"
 
 	"github.com/ifixrobots/tumblr-dms/pkg/connector"
@@ -26,21 +23,6 @@ var bridgeMain = mxmain.BridgeMain{
 
 func main() {
 	setSecureUmask()
-	if handled, exitCode := runSQLiteOwnershipRepairCLI(os.Args[1:]); handled {
-		if exitCode != 0 {
-			os.Exit(exitCode)
-		}
-		return
-	}
 	bridgeMain.InitVersion(Tag, Commit, BuildTime)
-	bridgeMain.PreInit()
-	if err := secureRuntimeFiles(&bridgeMain); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Refusing to start: could not secure Tumblr DMs runtime files: %v\n", err)
-		os.Exit(15)
-	}
-	bridgeMain.Init()
-	bridgeMain.Start()
-	exitCode := bridgeMain.WaitForInterrupt()
-	bridgeMain.Stop()
-	os.Exit(exitCode)
+	bridgeMain.Run()
 }

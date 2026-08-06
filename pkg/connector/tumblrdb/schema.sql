@@ -22,8 +22,9 @@ CREATE TABLE IF NOT EXISTS tumblr_conversation_sync_job (
 CREATE INDEX IF NOT EXISTS tumblr_conversation_sync_job_due_idx
     ON tumblr_conversation_sync_job (bridge_id, user_login_id, next_attempt_ts);
 
--- Outbound claims intentionally outlive user_login rows. A disconnect must not
--- erase a Tumblr POST whose remote outcome still needs reconciliation.
+-- Outbound claims survive process disconnects because user_login rows persist,
+-- but they must be removed when that login is deleted or transferred to a
+-- different Matrix user.
 CREATE TABLE IF NOT EXISTS tumblr_outbound_send (
     bridge_id             TEXT    NOT NULL,
     user_login_id         TEXT    NOT NULL,
@@ -54,6 +55,9 @@ CREATE TABLE IF NOT EXISTS tumblr_outbound_send (
     updated_ts            BIGINT  NOT NULL,
 
     PRIMARY KEY (bridge_id, user_login_id, transaction_id),
+    CONSTRAINT tumblr_outbound_send_user_login_fkey
+        FOREIGN KEY (bridge_id, user_login_id)
+        REFERENCES user_login (bridge_id, id) ON UPDATE CASCADE ON DELETE CASCADE,
     CONSTRAINT tumblr_outbound_send_state_check
         CHECK (state IN ('prepared', 'submitting', 'awaiting_echo', 'uncertain', 'resolved', 'completed', 'not_submitted', 'unconfirmed')),
     CONSTRAINT tumblr_outbound_send_message_type_check
@@ -132,8 +136,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS tumblr_outbound_send_remote_idx
 CREATE UNIQUE INDEX IF NOT EXISTS tumblr_outbound_send_matrix_event_idx
     ON tumblr_outbound_send (bridge_id, matrix_event_id);
 
--- Permanent, content-free idempotency receipts. Full failure rows may expire,
--- but an exact Matrix event can never become eligible for another Tumblr POST.
+-- Login-lifetime, content-free idempotency receipts. Full failure rows may
+-- expire, but an exact Matrix event cannot become eligible for another Tumblr
+-- POST while its user_login exists.
 CREATE TABLE IF NOT EXISTS tumblr_outbound_receipt (
     bridge_id       TEXT   NOT NULL,
     matrix_event_id TEXT   NOT NULL,
@@ -142,6 +147,9 @@ CREATE TABLE IF NOT EXISTS tumblr_outbound_receipt (
     terminal_ts     BIGINT NOT NULL,
 
     PRIMARY KEY (bridge_id, matrix_event_id),
+    CONSTRAINT tumblr_outbound_receipt_user_login_fkey
+        FOREIGN KEY (bridge_id, user_login_id)
+        REFERENCES user_login (bridge_id, id) ON UPDATE CASCADE ON DELETE CASCADE,
     CONSTRAINT tumblr_outbound_receipt_transaction_unique
         UNIQUE (bridge_id, user_login_id, transaction_id),
     CONSTRAINT tumblr_outbound_receipt_terminal_ts_check

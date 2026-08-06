@@ -12,37 +12,31 @@ ENV CGO_ENABLED=1 \
     GOTOOLCHAIN=local
 
 RUN apk add --no-cache \
-    build-base=0.5-r3 \
-    git=2.52.0-r0
+    git \
+    ca-certificates \
+    build-base \
+    su-exec \
+    olm-dev
 
 COPY . /build
 WORKDIR /build
 RUN CI=true \
     CI_COMMIT_SHA="$CI_COMMIT_SHA" \
     CI_COMMIT_TAG="$CI_COMMIT_TAG" \
-    MAU_STATIC_BUILD=true \
-    ./build.sh -o /out/tumblr-dms \
-    && /out/tumblr-dms --version
-
-FROM scratch AS artifact
-
-COPY --from=builder /out/tumblr-dms /tumblr-dms
+    ./build.sh \
+    && ./tumblr-dms --version
 
 FROM ${RUNTIME_IMAGE} AS runtime
 
-ARG CI_COMMIT_SHA=unknown
-ARG CI_COMMIT_TAG
+ENV UID=1337 \
+    GID=1337
 
-LABEL org.opencontainers.image.title="Tumblr DMs bridge" \
-      org.opencontainers.image.source="https://github.com/beeper/tumblr-dms" \
-      org.opencontainers.image.revision="$CI_COMMIT_SHA" \
-      org.opencontainers.image.version="$CI_COMMIT_TAG"
+# Keep the standard mautrix bridge runtime toolset. Beeper's hosted launcher
+# directly uses bash, curl, jq, and yq, while the remaining tools keep the
+# image consistent with supported self-hosting and live debugging workflows.
+RUN apk add --no-cache ffmpeg su-exec ca-certificates olm bash jq yq-go curl
 
-RUN apk add --no-cache \
-    ca-certificates=20260611-r0 \
-    su-exec=0.3-r0
-
-COPY --from=builder --chmod=0755 /out/tumblr-dms /usr/bin/tumblr-dms
+COPY --from=builder --chmod=0755 /build/tumblr-dms /usr/bin/tumblr-dms
 COPY --chmod=0755 docker-run.sh /docker-run.sh
 
 VOLUME /data

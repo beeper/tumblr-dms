@@ -54,6 +54,10 @@ func (tc *TumblrClient) GetPushConfigs() *bridgev2.PushConfig {
 }
 
 func (tc *TumblrClient) RegisterPushNotifications(ctx context.Context, pushType bridgev2.PushType, token string) error {
+	if !tc.beginOwnedOperation() {
+		return bridgev2.ErrNotLoggedIn
+	}
+	defer tc.endOwnedOperation()
 	return tc.registerTumblrPushEndpoint(ctx, pushType, token)
 }
 
@@ -102,6 +106,10 @@ func (tc *TumblrClient) registerTumblrPushEndpoint(ctx context.Context, pushType
 }
 
 func (tc *TumblrClient) ConnectBackground(ctx context.Context, params *bridgev2.ConnectBackgroundParams) (err error) {
+	if !tc.beginOwnedOperation() {
+		return bridgev2.ErrNotLoggedIn
+	}
+	defer tc.endOwnedOperation()
 	client, err := tc.tumblrClient()
 	if err != nil {
 		return err
@@ -109,7 +117,7 @@ func (tc *TumblrClient) ConnectBackground(ctx context.Context, params *bridgev2.
 	defer func() {
 		persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), tumblrPushRequestTimeout)
 		defer cancel()
-		if persistErr := tc.persistSessionSnapshot(persistCtx, client.SessionSnapshot()); persistErr != nil {
+		if persistErr := tc.persistOwnedSessionSnapshot(persistCtx, client.SessionSnapshot()); persistErr != nil {
 			err = errors.Join(err, fmt.Errorf("failed to save refreshed Tumblr session after background sync: %w", persistErr))
 		}
 	}()

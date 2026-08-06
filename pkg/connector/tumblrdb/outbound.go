@@ -30,8 +30,9 @@ const (
 	OutboundSendUnconfirmed  OutboundSendState = "unconfirmed"
 )
 
-// Completed outbound rows are permanent dedupe receipts. Their due timestamp
-// is the largest representable database integer so workers never select them.
+// Completed outbound rows are dedupe receipts for the lifetime of their
+// user_login. Their due timestamp is the largest representable database integer
+// so workers never select them.
 const OutboundCompletedReceiptUnixMilli int64 = 1<<63 - 1
 
 type OutboundMessageType string
