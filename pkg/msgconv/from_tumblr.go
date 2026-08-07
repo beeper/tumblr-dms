@@ -36,7 +36,7 @@ func CanUseImageMedia(message tumblr.Message) bool {
 	case tumblr.MessageTypeImage, tumblr.MessageTypeSticker:
 		return len(message.Images) > 0
 	case tumblr.MessageTypePostRef:
-		return len(message.Post.GIFPreviewCandidates()) > 0
+		return message.PostRefGIFMode() != tumblr.PostRefGIFOrdinary
 	default:
 		return false
 	}

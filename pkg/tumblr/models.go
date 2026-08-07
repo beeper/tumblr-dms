@@ -447,6 +447,7 @@ func (p *MessagePage) UnmarshalJSON(data []byte) error {
 type Message struct {
 	ID          string          `json:"id"`
 	Type        string          `json:"type"`
+	Context     string          `json:"context,omitempty"`
 	Participant *Blog           `json:"participant"`
 	Content     *MessageContent `json:"content"`
 	Post        *PostRef        `json:"post"`
@@ -459,6 +460,7 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 	var raw struct {
 		ID          string          `json:"id"`
 		Type        string          `json:"type"`
+		Context     string          `json:"context"`
 		Participant json.RawMessage `json:"participant"`
 		Content     *MessageContent `json:"content"`
 		Post        *PostRef        `json:"post"`
@@ -474,6 +476,7 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 	m.Raw = append(m.Raw[:0], data...)
 	m.ID = strings.TrimSpace(raw.ID)
 	m.Type = strings.TrimSpace(raw.Type)
+	m.Context = strings.TrimSpace(raw.Context)
 	m.Participant = nil
 	if len(raw.Participant) > 0 && string(raw.Participant) != "null" {
 		participant, err := decodeMessageParticipant(raw.Participant)
@@ -750,6 +753,8 @@ type PostRef struct {
 	Summary          string                 `json:"summary"`
 	State            string                 `json:"state,omitempty"`
 	IsNSFW           bool                   `json:"isNsfw,omitempty"`
+	IsGIF            bool                   `json:"isGif,omitempty"`
+	HasIsGIF         bool                   `json:"-"`
 	ObjectType       string                 `json:"objectType,omitempty"`
 	Type             string                 `json:"type,omitempty"`
 	Classification   string                 `json:"classification,omitempty"`
@@ -767,6 +772,7 @@ func (p *PostRef) UnmarshalJSON(data []byte) error {
 		Summary          string                 `json:"summary"`
 		State            string                 `json:"state"`
 		IsNSFW           bool                   `json:"isNsfw"`
+		IsGIF            *bool                  `json:"isGif"`
 		ObjectType       string                 `json:"objectType"`
 		Type             string                 `json:"type"`
 		Classification   string                 `json:"classification"`
@@ -785,6 +791,8 @@ func (p *PostRef) UnmarshalJSON(data []byte) error {
 	p.Summary = raw.Summary
 	p.State = strings.TrimSpace(raw.State)
 	p.IsNSFW = raw.IsNSFW
+	p.HasIsGIF = raw.IsGIF != nil
+	p.IsGIF = p.HasIsGIF && *raw.IsGIF
 	p.ObjectType = strings.TrimSpace(raw.ObjectType)
 	p.Type = strings.TrimSpace(raw.Type)
 	p.Classification = strings.TrimSpace(raw.Classification)
@@ -814,6 +822,16 @@ func (p PostRef) IsUnavailable() bool {
 
 const maxPostRefGIFCandidates = 16
 
+const MessageContextGIF = "messaging-gif"
+
+type PostRefGIFMode uint8
+
+const (
+	PostRefGIFOrdinary PostRefGIFMode = iota
+	PostRefGIFKnown
+	PostRefGIFProbe
+)
+
 type PostRefContent struct {
 	Type  string         `json:"type"`
 	Text  string         `json:"text,omitempty"`
@@ -833,43 +851,81 @@ type PostRefCommunityLabels struct {
 	HasCommunityLabel bool `json:"hasCommunityLabel"`
 }
 
-// GIFPreviewCandidates returns only Tumblr-hosted, uncropped animation
-// variants from a post reference whose complete payload proves it contains one
-// GIF. Tumblr wraps GIF Search results in a post reference and may omit the
-// optional poster asset; that wrapper is not part of the message shown to the
-// Matrix user. Anything ambiguous stays a normal Tumblr post link.
+// PostRefGIFMode reports whether a post reference is known to be a GIF, may be
+// probed as a GIF, or must remain an ordinary shared post. Tumblr's hydrated
+// conversation payloads may omit both the GIF-search context and post.isGif,
+// and may declare actual GIF bytes as image/webp. The strict structural case is
+// therefore only a probe: downloaded bytes remain the authority.
+func (m Message) PostRefGIFMode() PostRefGIFMode {
+	if !strings.EqualFold(strings.TrimSpace(m.Type), MessageTypePostRef) || m.Post == nil {
+		return PostRefGIFOrdinary
+	}
+	if m.Post.HasIsGIF {
+		if m.Post.IsGIF {
+			return PostRefGIFKnown
+		}
+		return PostRefGIFOrdinary
+	}
+	if strings.EqualFold(strings.TrimSpace(m.Context), MessageContextGIF) {
+		return PostRefGIFKnown
+	}
+	if m.Post.hasSingleImagePostShape() {
+		return PostRefGIFProbe
+	}
+	return PostRefGIFOrdinary
+}
+
+func (p *PostRef) hasSingleImagePostShape() bool {
+	imageBlocks := 0
+	hasMedia := false
+	for _, block := range p.Content {
+		switch {
+		case strings.EqualFold(strings.TrimSpace(block.Type), "image"):
+			imageBlocks++
+			if imageBlocks > 1 {
+				return false
+			}
+			if len(block.Media) > 0 {
+				hasMedia = true
+			}
+		case strings.EqualFold(strings.TrimSpace(block.Type), "text"):
+			// These are source-post text blocks, not text authored in the DM
+			// composer. Tumblr emits composer text as a separate TEXT message.
+		default:
+			return false
+		}
+	}
+	return imageBlocks == 1 && hasMedia
+}
+
+// GIFPreviewCandidates returns Tumblr-hosted, uncropped renditions that may
+// contain GIF bytes. Tumblr wraps GIFs in posts, may attach arbitrary source-
+// post text blocks, and may label actual GIF bytes as image/webp. Those wrapper
+// fields are never part of the Matrix media message. Text authored in the DM
+// composer arrives as a separate TEXT message and is preserved by the normal
+// text converter. The downloaded bytes remain the final authority.
 func (p *PostRef) GIFPreviewCandidates() []ImageAsset {
 	if p == nil || p.IsUnavailable() || p.Blog.IsAdult || p.Blog.ShouldBlur ||
 		p.CommunityLabels.HasCommunityLabel || !p.CanSendInMessage ||
 		!strings.EqualFold(p.ObjectType, "post") || !strings.EqualFold(p.Type, "blocks") ||
 		!strings.EqualFold(p.State, "published") ||
-		!strings.EqualFold(p.Classification, "clean") ||
-		len(p.Content) == 0 || len(p.Content) > 2 {
+		!strings.EqualFold(p.Classification, "clean") {
 		return nil
 	}
 
-	imageBlock := p.Content[0]
-	if !strings.EqualFold(strings.TrimSpace(imageBlock.Type), "image") || strings.TrimSpace(imageBlock.Text) != "" {
-		return nil
-	}
-	if len(p.Content) == 2 {
-		captionBlock := p.Content[1]
-		if !strings.EqualFold(strings.TrimSpace(captionBlock.Type), "text") || len(captionBlock.Media) != 0 ||
-			strings.TrimSpace(captionBlock.Text) == "" || strings.TrimSpace(captionBlock.Text) != strings.TrimSpace(p.Summary) {
-			return nil
+	var media []PostRefMedia
+	for _, block := range p.Content {
+		if strings.EqualFold(strings.TrimSpace(block.Type), "image") && len(block.Media) > 0 {
+			media = block.Media
+			break
 		}
 	}
-
-	media := imageBlock.Media
-	if len(media) == 0 || len(media) > maxPostRefGIFCandidates {
+	if len(media) == 0 {
 		return nil
 	}
 	candidates := make([]ImageAsset, 0, len(media))
 	seenURLs := make(map[string]struct{}, len(media))
 	for _, item := range media {
-		if !strings.EqualFold(strings.TrimSpace(item.Type), "image/gif") {
-			return nil
-		}
 		if item.Cropped || item.Width <= 0 || item.Height <= 0 {
 			continue
 		}
@@ -887,14 +943,9 @@ func (p *PostRef) GIFPreviewCandidates() []ImageAsset {
 			Height: item.Height,
 		})
 	}
-	sort.SliceStable(candidates, func(i, j int) bool {
-		iHigh, iLow := imageAssetArea(candidates[i])
-		jHigh, jLow := imageAssetArea(candidates[j])
-		if iHigh != jHigh {
-			return iHigh > jHigh
-		}
-		return iLow > jLow
-	})
+	if len(candidates) > maxPostRefGIFCandidates {
+		candidates = candidates[:maxPostRefGIFCandidates]
+	}
 	return candidates
 }
 
