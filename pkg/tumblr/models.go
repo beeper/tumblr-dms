@@ -835,8 +835,9 @@ type PostRefCommunityLabels struct {
 
 // GIFPreviewCandidates returns only Tumblr-hosted, uncropped animation
 // variants from a post reference whose complete payload proves it contains one
-// GIF and, optionally, the same caption Tumblr supplied in the post summary.
-// Anything ambiguous stays a normal Tumblr post link.
+// GIF. Tumblr wraps GIF Search results in a post reference and may omit the
+// optional poster asset; that wrapper is not part of the message shown to the
+// Matrix user. Anything ambiguous stays a normal Tumblr post link.
 func (p *PostRef) GIFPreviewCandidates() []ImageAsset {
 	if p == nil || p.IsUnavailable() || p.Blog.IsAdult || p.Blog.ShouldBlur ||
 		p.CommunityLabels.HasCommunityLabel || !p.CanSendInMessage ||
@@ -869,13 +870,11 @@ func (p *PostRef) GIFPreviewCandidates() []ImageAsset {
 		if !strings.EqualFold(strings.TrimSpace(item.Type), "image/gif") {
 			return nil
 		}
-		if item.Cropped || item.Width <= 0 || item.Height <= 0 || item.Poster == nil {
+		if item.Cropped || item.Width <= 0 || item.Height <= 0 {
 			continue
 		}
 		itemURL := strings.TrimSpace(item.URL)
-		posterURL := strings.TrimSpace(item.Poster.URL)
-		if itemURL == "" || posterURL == "" || itemURL == posterURL ||
-			!IsDownloadURLAllowed(itemURL) || !IsDownloadURLAllowed(posterURL) {
+		if itemURL == "" || !IsDownloadURLAllowed(itemURL) {
 			continue
 		}
 		if _, seen := seenURLs[itemURL]; seen {

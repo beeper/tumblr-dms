@@ -72,9 +72,6 @@ func (tc *TumblrClient) convertTumblrMessageWithMedia(ctx context.Context, porta
 		if part == nil {
 			return tc.fallbackTumblrPostRefGIF(message, fmt.Errorf("tumblr GIF conversion returned no message part")), nil
 		}
-		if caption := msgconv.PostRefMediaCaption(message.Post); caption != "" {
-			part.Content.Body = caption
-		}
 		return &bridgev2.ConvertedMessage{Parts: []*bridgev2.ConvertedMessagePart{part}}, nil
 	}
 	parts := make([]*bridgev2.ConvertedMessagePart, 0, len(message.Images))
