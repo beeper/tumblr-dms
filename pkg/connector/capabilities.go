@@ -23,7 +23,7 @@ var generalCaps = bridgev2.NetworkGeneralCapabilities{
 }
 
 var roomCaps = event.RoomFeatures{
-	ID: "com.ifixrobots.tumblr_dms.capabilities.2026_08_04_media_hardening",
+	ID: "com.ifixrobots.tumblr_dms.capabilities.2026_08_07_gif_send",
 	File: event.FileFeatureMap{
 		event.MsgImage: {
 			MimeTypes: map[string]event.CapabilitySupportLevel{
@@ -47,7 +47,7 @@ var roomCaps = event.RoomFeatures{
 		},
 		event.CapMsgGIF: {
 			MimeTypes: map[string]event.CapabilitySupportLevel{
-				"image/gif": event.CapLevelPartialSupport,
+				"image/gif": event.CapLevelFullySupported,
 			},
 			Caption: event.CapLevelDropped,
 			MaxSize: tumblr.DefaultMaxUploadBytes,
@@ -73,7 +73,7 @@ func (tc *TumblrConnector) GetCapabilities() *bridgev2.NetworkGeneralCapabilitie
 }
 
 func (tc *TumblrConnector) GetBridgeInfoVersion() (info, capabilities int) {
-	return 1, 7
+	return 1, 8
 }
 
 func (tc *TumblrClient) GetCapabilities(context.Context, *bridgev2.Portal) *event.RoomFeatures {

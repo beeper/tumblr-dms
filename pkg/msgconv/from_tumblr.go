@@ -143,10 +143,20 @@ func noticePostBody(post *tumblr.PostRef) string {
 	}
 }
 
-// PostRefMediaCaption preserves the text and link from a GIF-only post
-// reference when the connector renders its animation as Matrix media.
+// PostRefMediaCaption returns only a caption Tumblr explicitly included with
+// a GIF. The post URL is transport metadata and must not become a media
+// caption when the GIF itself was bridged successfully.
 func PostRefMediaCaption(post *tumblr.PostRef) string {
-	return cleanMessageBody(noticePostBody(post))
+	if post == nil || len(post.Content) != 2 {
+		return ""
+	}
+	captionBlock := post.Content[1]
+	caption := strings.TrimSpace(captionBlock.Text)
+	if !strings.EqualFold(strings.TrimSpace(captionBlock.Type), "text") || len(captionBlock.Media) != 0 ||
+		caption == "" || caption != strings.TrimSpace(post.Summary) {
+		return ""
+	}
+	return cleanMessageBody(caption)
 }
 
 func noticeMessageType(messageType string) string {
