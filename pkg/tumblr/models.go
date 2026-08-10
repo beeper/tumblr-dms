@@ -853,49 +853,19 @@ type PostRefCommunityLabels struct {
 
 // PostRefGIFMode reports whether a post reference is known to be a GIF, may be
 // probed as a GIF, or must remain an ordinary shared post. Tumblr's hydrated
-// conversation payloads may omit both the GIF-search context and post.isGif,
-// and may declare actual GIF bytes as image/webp. The strict structural case is
-// therefore only a probe: downloaded bytes remain the authority.
+// conversation payloads may omit or mislabel GIF metadata, so eligible media
+// candidates are probed and downloaded bytes remain the authority.
 func (m Message) PostRefGIFMode() PostRefGIFMode {
 	if !strings.EqualFold(strings.TrimSpace(m.Type), MessageTypePostRef) || m.Post == nil {
 		return PostRefGIFOrdinary
 	}
-	if m.Post.HasIsGIF {
-		if m.Post.IsGIF {
-			return PostRefGIFKnown
-		}
-		return PostRefGIFOrdinary
-	}
-	if strings.EqualFold(strings.TrimSpace(m.Context), MessageContextGIF) {
+	if (m.Post.HasIsGIF && m.Post.IsGIF) || strings.EqualFold(strings.TrimSpace(m.Context), MessageContextGIF) {
 		return PostRefGIFKnown
 	}
-	if m.Post.hasSingleImagePostShape() {
+	if len(m.Post.GIFPreviewCandidates()) > 0 {
 		return PostRefGIFProbe
 	}
 	return PostRefGIFOrdinary
-}
-
-func (p *PostRef) hasSingleImagePostShape() bool {
-	imageBlocks := 0
-	hasMedia := false
-	for _, block := range p.Content {
-		switch {
-		case strings.EqualFold(strings.TrimSpace(block.Type), "image"):
-			imageBlocks++
-			if imageBlocks > 1 {
-				return false
-			}
-			if len(block.Media) > 0 {
-				hasMedia = true
-			}
-		case strings.EqualFold(strings.TrimSpace(block.Type), "text"):
-			// These are source-post text blocks, not text authored in the DM
-			// composer. Tumblr emits composer text as a separate TEXT message.
-		default:
-			return false
-		}
-	}
-	return imageBlocks == 1 && hasMedia
 }
 
 // GIFPreviewCandidates returns Tumblr-hosted, uncropped renditions that may
