@@ -41,10 +41,17 @@ func messageCanUseImageMedia(message tumblr.Message) bool {
 }
 
 func (tc *TumblrClient) convertTumblrMessageWithMedia(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, message tumblr.Message) (*bridgev2.ConvertedMessage, error) {
+	postRefGIFMode := message.PostRefGIFMode()
 	if !messageCanUseImageMedia(message) {
+		if message.Type == tumblr.MessageTypePostRef {
+			if log := tc.log(); log != nil {
+				log.Debug().
+					Str("message_id_hash", logIdentifierHash(message.ID)).
+					Msg("Keeping Tumblr post without GIF media inspection")
+			}
+		}
 		return tc.convertTumblrMessage(message), nil
 	}
-	postRefGIFMode := message.PostRefGIFMode()
 	postRefGIFCandidates := message.Post.GIFPreviewCandidates()
 
 	client, clientErr := tc.tumblrClient()
@@ -68,12 +75,6 @@ func (tc *TumblrClient) convertTumblrMessageWithMedia(ctx context.Context, porta
 		return nil, err
 	}
 	if postRefGIFMode != tumblr.PostRefGIFOrdinary {
-		// The first source-order rendition is the authoritative post media for
-		// ambiguous post references. Later renditions may be static derivatives,
-		// so they must not turn a failed GIF probe into an ordinary post link.
-		if postRefGIFMode == tumblr.PostRefGIFProbe && len(postRefGIFCandidates) > 1 {
-			postRefGIFCandidates = postRefGIFCandidates[:1]
-		}
 		part, permanentlyUnavailable, err := tc.convertTumblrImage(
 			ctx,
 			portal,
@@ -82,7 +83,6 @@ func (tc *TumblrClient) convertTumblrMessageWithMedia(ctx context.Context, porta
 			message,
 			postRefGIFCandidates,
 			"image/gif",
-			postRefGIFMode == tumblr.PostRefGIFProbe,
 			0,
 		)
 		if err != nil {
@@ -94,6 +94,12 @@ func (tc *TumblrClient) convertTumblrMessageWithMedia(ctx context.Context, porta
 			}
 			if postRefGIFMode == tumblr.PostRefGIFProbe {
 				if errors.Is(err, errRequiredImageFormat) {
+					if log := tc.log(); log != nil {
+						log.Debug().
+							Str("message_id_hash", logIdentifierHash(message.ID)).
+							Int("candidate_count", len(postRefGIFCandidates)).
+							Msg("Keeping Tumblr post because all media candidates were non-GIF")
+					}
 					return tc.convertTumblrMessage(message), nil
 				}
 				return tc.fallbackTumblrPostRefMedia(message, err), nil
@@ -111,7 +117,7 @@ func (tc *TumblrClient) convertTumblrMessageWithMedia(ctx context.Context, porta
 	parts := make([]*bridgev2.ConvertedMessagePart, 0, len(message.Images))
 	for index, image := range message.Images {
 		partID := tumblrImagePartID(index)
-		part, permanentlyUnavailable, err := tc.convertTumblrImage(ctx, portal, intent, client, message, image.Candidates(), "", false, index)
+		part, permanentlyUnavailable, err := tc.convertTumblrImage(ctx, portal, intent, client, message, image.Candidates(), "", index)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
@@ -187,7 +193,6 @@ func (tc *TumblrClient) convertTumblrImage(
 	message tumblr.Message,
 	candidates []tumblr.ImageAsset,
 	requiredMIMEType string,
-	stopOnMIMEMismatch bool,
 	logicalIndex int,
 ) (*bridgev2.ConvertedMessagePart, bool, error) {
 	if len(candidates) == 0 {
@@ -198,7 +203,8 @@ func (tc *TumblrClient) convertTumblrImage(
 		roomID = portal.MXID
 	}
 	var firstTransientErr error
-	var lastPermanentErr error
+	var firstPermanentErr error
+	mismatchedCandidates := 0
 	for candidateIndex, image := range candidates {
 		downloaded, err := client.DownloadImage(ctx, image.URL, tumblr.DefaultMaxDownloadBytes)
 		if err != nil {
@@ -207,17 +213,16 @@ func (tc *TumblrClient) convertTumblrImage(
 			}
 			candidateErr := fmt.Errorf("candidate %d download failed: %w", candidateIndex, err)
 			if tumblr.IsPermanentMediaDownloadError(err) {
-				lastPermanentErr = candidateErr
+				if firstPermanentErr == nil {
+					firstPermanentErr = candidateErr
+				}
 			} else if firstTransientErr == nil {
 				firstTransientErr = candidateErr
 			}
 			continue
 		}
 		if requiredMIMEType != "" && downloaded.MIMEType != requiredMIMEType {
-			lastPermanentErr = fmt.Errorf("candidate %d: %w", candidateIndex, errRequiredImageFormat)
-			if stopOnMIMEMismatch {
-				return nil, true, lastPermanentErr
-			}
+			mismatchedCandidates++
 			continue
 		}
 		fileName := tumblrImageFileName(downloaded.MIMEType, logicalIndex)
@@ -258,9 +263,15 @@ func (tc *TumblrClient) convertTumblrImage(
 		}, false, nil
 	}
 	if firstTransientErr != nil {
-		return nil, false, firstTransientErr
+		return nil, false, fmt.Errorf("checked %d candidates: %w", len(candidates), firstTransientErr)
 	}
-	return nil, true, lastPermanentErr
+	if firstPermanentErr != nil {
+		return nil, true, fmt.Errorf("checked %d candidates: %w", len(candidates), firstPermanentErr)
+	}
+	if mismatchedCandidates == len(candidates) {
+		return nil, true, fmt.Errorf("all %d candidates: %w", len(candidates), errRequiredImageFormat)
+	}
+	return nil, true, fmt.Errorf("tumblr image candidates produced no usable media")
 }
 
 func tumblrImageFailureNotice(message tumblr.Message, index, total int) *bridgev2.ConvertedMessagePart {
