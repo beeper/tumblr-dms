@@ -165,7 +165,7 @@ func (tl *TumblrLogin) cookieStep(instructions string) *bridgev2.LoginStep {
 	fields := []bridgev2.LoginCookieField{
 		{
 			ID:       "cookie_header",
-			Required: false,
+			Required: true,
 			Sources: []bridgev2.LoginCookieFieldSource{
 				{Type: bridgev2.LoginCookieTypeRequestHeader, Name: "Cookie", RequestURLRegex: `^https://www\.tumblr\.com/.*`},
 				{Type: bridgev2.LoginCookieTypeSpecial, Name: "com.ifixrobots.tumblr_dms.cookie_header"},
