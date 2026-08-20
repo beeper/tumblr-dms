@@ -202,7 +202,7 @@ delivery issues.
 
 Requirements:
 
-- Go 1.25 or newer.
+- Go 1.26 or newer.
 - libolm development headers.
 
 On macOS:
