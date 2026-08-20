@@ -52,6 +52,11 @@ var apiTransientRetryDelays = []time.Duration{
 	1250 * time.Millisecond,
 }
 
+var authRefreshRetryDelays = []time.Duration{
+	3 * time.Second,
+	6 * time.Second,
+}
+
 type Options struct {
 	WebBaseURL     string
 	APIBaseURL     string
@@ -510,7 +515,25 @@ func (c *Client) refreshAuthAfterFailure(ctx context.Context, failedGeneration u
 	if c.currentAuthGeneration() != failedGeneration {
 		return nil
 	}
-	return c.bootstrap(ctx)
+	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := c.bootstrap(ctx)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		if err == nil || !IsAuthError(err) || attempt >= len(authRefreshRetryDelays) {
+			return err
+		}
+		timer := time.NewTimer(authRefreshRetryDelays[attempt])
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func (c *Client) currentAuthGeneration() uint64 {
@@ -1345,8 +1368,9 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		err = c.doOnce(ctx, method, path, query, body, out)
 		if ShouldRefreshAuth(err, mutating) && !authRetried {
 			authRetried = true
-			if err = c.refreshAuthAfterFailure(ctx, requestGeneration); err != nil {
-				return err
+			authErr := err
+			if refreshErr := c.refreshAuthAfterFailure(ctx, requestGeneration); refreshErr != nil {
+				return fmt.Errorf("tumblr API %s returned %v; authentication refresh failed: %w", method, authErr, refreshErr)
 			}
 			if mutating && !c.hasCSRFToken() {
 				return fmt.Errorf("tumblr API CSRF token is missing")
