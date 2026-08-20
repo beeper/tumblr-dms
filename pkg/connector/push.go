@@ -27,6 +27,8 @@ const (
 	tumblrPushCheckinInterval        = 24 * time.Hour
 	tumblrPushMaintenanceInterval    = time.Hour
 	tumblrPushRequestTimeout         = 30 * time.Second
+	tumblrPushRegistrationAttempts   = 5
+	tumblrPushRegistrationRetryDelay = time.Second
 	maxStoredTumblrPushPersistentIDs = 32
 )
 
@@ -348,9 +350,26 @@ func (tc *TumblrClient) stagePushRegistration(ctx context.Context, active *PushR
 	if !forceNew && active != nil {
 		opts.AppID = active.FCMAppID
 	}
-	fcmCredentials, err := pushreceiver.RegisterGCM(requestCtx, tumblrWebPushVAPIDKey, *credentials, opts)
-	if err != nil {
-		return nil, fmt.Errorf("failed to register Beeper's Tumblr push receiver with FCM: %w", err)
+	var fcmCredentials *pushreceiver.FCMCredentials
+	for attempt := 1; attempt <= tumblrPushRegistrationAttempts; attempt++ {
+		fcmCredentials, err = pushreceiver.RegisterGCM(requestCtx, tumblrWebPushVAPIDKey, *credentials, opts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to register Beeper's Tumblr push receiver with FCM: %w", err)
+		}
+		if fcmCredentials != nil && strings.TrimSpace(fcmCredentials.Token) != "" && strings.TrimSpace(fcmCredentials.AppID) != "" {
+			break
+		}
+		if log := tc.log(); log != nil {
+			log.Warn().
+				Int("attempt", attempt).
+				Int("max_attempts", tumblrPushRegistrationAttempts).
+				Msg("FCM returned an incomplete Tumblr push receiver registration")
+		}
+		if attempt < tumblrPushRegistrationAttempts {
+			if !waitForPushRetry(requestCtx, tumblrPushRegistrationRetryDelay) {
+				return nil, requestCtx.Err()
+			}
+		}
 	}
 	if fcmCredentials == nil || strings.TrimSpace(fcmCredentials.Token) == "" || strings.TrimSpace(fcmCredentials.AppID) == "" {
 		return nil, fmt.Errorf("FCM returned an incomplete Tumblr push receiver registration")
