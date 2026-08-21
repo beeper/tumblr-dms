@@ -55,7 +55,7 @@ func (c *Client) PrepareLogin(ctx context.Context) error {
 func (c *Client) PasswordLogin(ctx context.Context, req PasswordLoginRequest) error {
 	req.Identifier = strings.TrimSpace(req.Identifier)
 	if req.Identifier == "" || req.Password == "" {
-		return errors.New("Tumblr email and password are required")
+		return errors.New("tumblr email and password are required")
 	}
 	req.GrantType = "password"
 	previousCSRF := c.CSRFToken()
