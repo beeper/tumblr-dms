@@ -31,7 +31,7 @@ func (c *Client) PrepareLogin(ctx context.Context) error {
 		if resp != nil && resp.Body != nil {
 			resp.Body.Close()
 		}
-		return &BootstrapError{Message: "Tumblr login page request failed"}
+		return &BootstrapError{Message: "tumblr login page request failed"}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
