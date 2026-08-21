@@ -41,10 +41,11 @@ const (
 )
 
 var (
-	apiURLRe    = regexp.MustCompile(`"apiUrl"\s*:\s*"([^"]+)"`)
-	apiTokenRe  = regexp.MustCompile(`"API_TOKEN"\s*:\s*"([^"]+)"`)
-	csrfTokenRe = regexp.MustCompile(`"csrfToken"\s*:\s*"([^"]*)"`)
-	loggedOutRe = regexp.MustCompile(`"isLoggedIn"\s*:\s*false`)
+	apiURLRe           = regexp.MustCompile(`"apiUrl"\s*:\s*"([^"]+)"`)
+	apiTokenRe         = regexp.MustCompile(`"API_TOKEN"\s*:\s*"([^"]+)"`)
+	csrfTokenRe        = regexp.MustCompile(`"csrfToken"\s*:\s*"([^"]*)"`)
+	recaptchaSiteKeyRe = regexp.MustCompile(`"recaptchaV3PublicKey"\s*:\s*\{\s*"value"\s*:\s*"([^"]+)"`)
+	loggedOutRe        = regexp.MustCompile(`"isLoggedIn"\s*:\s*false`)
 )
 
 var apiTransientRetryDelays = []time.Duration{
@@ -70,18 +71,19 @@ type Options struct {
 }
 
 type Client struct {
-	mu             sync.RWMutex
-	authRefreshMu  sync.Mutex
-	authGeneration uint64
-	webBaseURL     string
-	apiBaseURL     string
-	userAgent      string
-	apiToken       string
-	csrfToken      string
-	apiVersion     string
-	httpClient     *http.Client
-	sessionURLs    []*url.URL
-	sessionUpdates chan struct{}
+	mu               sync.RWMutex
+	authRefreshMu    sync.Mutex
+	authGeneration   uint64
+	webBaseURL       string
+	apiBaseURL       string
+	userAgent        string
+	apiToken         string
+	csrfToken        string
+	apiVersion       string
+	recaptchaSiteKey string
+	httpClient       *http.Client
+	sessionURLs      []*url.URL
+	sessionUpdates   chan struct{}
 }
 
 type ImageUpload struct {
@@ -445,6 +447,12 @@ func (c *Client) APIVersion() string {
 	return c.apiVersion
 }
 
+func (c *Client) RecaptchaSiteKey() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.recaptchaSiteKey
+}
+
 func (c *Client) SessionSnapshot() SessionSnapshot {
 	if c == nil {
 		return SessionSnapshot{}
@@ -587,6 +595,7 @@ func (c *Client) bootstrapFromHTML(html string) error {
 	rawAPIToken := unescapeBootstrapValue(firstSubmatch(apiTokenRe, html))
 	apiToken := normalizeBearerToken(rawAPIToken)
 	csrfToken := normalizeOptionalHeaderCredential(unescapeBootstrapValue(firstSubmatch(csrfTokenRe, html)))
+	recaptchaSiteKey := strings.TrimSpace(unescapeBootstrapValue(firstSubmatch(recaptchaSiteKeyRe, html)))
 	apiBaseURL := ""
 	if apiURL != "" {
 		normalized, err := normalizeBootstrapAPIURL(apiURL, c.webBaseURL)
@@ -607,6 +616,9 @@ func (c *Client) bootstrapFromHTML(html string) error {
 	}
 	c.apiToken = apiToken
 	c.csrfToken = csrfToken
+	if recaptchaSiteKey != "" {
+		c.recaptchaSiteKey = recaptchaSiteKey
+	}
 	c.authGeneration++
 	c.mu.Unlock()
 	return nil
@@ -1554,9 +1566,11 @@ func (c *Client) doOnceWithRedirectPolicy(ctx context.Context, method, path stri
 	}
 
 	var envelope struct {
-		Meta     APIMeta         `json:"meta"`
-		Response json.RawMessage `json:"response"`
-		Errors   []APIError      `json:"errors"`
+		Meta            APIMeta         `json:"meta"`
+		Response        json.RawMessage `json:"response"`
+		Errors          []APIError      `json:"errors"`
+		ErrorCode       string          `json:"error"`
+		CaptchaRequired bool            `json:"captchaRequired"`
 	}
 	if len(responseBody) > 0 {
 		if err = json.Unmarshal(responseBody, &envelope); err != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -1565,18 +1579,22 @@ func (c *Client) doOnceWithRedirectPolicy(ctx context.Context, method, path stri
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return &Error{
-			StatusCode: resp.StatusCode,
-			Status:     safeErrorDetail(resp.Status),
-			Errors:     safeAPIErrors(envelope.Errors),
-			Body:       safeErrorBody(responseBody),
+			StatusCode:      resp.StatusCode,
+			Status:          safeErrorDetail(resp.Status),
+			Errors:          safeAPIErrors(envelope.Errors),
+			Body:            safeErrorBody(responseBody),
+			ErrorCode:       strings.TrimSpace(envelope.ErrorCode),
+			CaptchaRequired: envelope.CaptchaRequired,
 		}
 	}
 	if envelope.Meta.Status != 0 && (envelope.Meta.Status < 200 || envelope.Meta.Status >= 300) {
 		return &Error{
-			StatusCode: envelope.Meta.Status,
-			Status:     safeAPIMetaStatus(envelope.Meta.Status, envelope.Meta.Msg),
-			Errors:     safeAPIErrors(envelope.Errors),
-			Body:       safeErrorBody(responseBody),
+			StatusCode:      envelope.Meta.Status,
+			Status:          safeAPIMetaStatus(envelope.Meta.Status, envelope.Meta.Msg),
+			Errors:          safeAPIErrors(envelope.Errors),
+			Body:            safeErrorBody(responseBody),
+			ErrorCode:       strings.TrimSpace(envelope.ErrorCode),
+			CaptchaRequired: envelope.CaptchaRequired,
 		}
 	}
 	if out == nil {

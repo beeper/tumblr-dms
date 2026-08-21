@@ -69,16 +69,17 @@ func (r *BlogInfoResponse) UnmarshalJSON(data []byte) error {
 }
 
 type Blog struct {
-	UUID        string       `json:"uuid"`
-	Name        string       `json:"name"`
-	Title       string       `json:"title"`
-	URL         string       `json:"url"`
-	BlogViewURL string       `json:"blogViewUrl"`
-	CanMessage  bool         `json:"canMessage"`
-	Primary     bool         `json:"primary"`
-	IsAdult     bool         `json:"isAdult"`
-	Avatar      []ImageAsset `json:"avatar"`
-	Theme       *BlogTheme   `json:"theme"`
+	UUID           string       `json:"uuid"`
+	Name           string       `json:"name"`
+	Title          string       `json:"title"`
+	URL            string       `json:"url"`
+	BlogViewURL    string       `json:"blogViewUrl"`
+	CanMessage     bool         `json:"canMessage"`
+	IsGroupChannel bool         `json:"isGroupChannel"`
+	Primary        bool         `json:"primary"`
+	IsAdult        bool         `json:"isAdult"`
+	Avatar         []ImageAsset `json:"avatar"`
+	Theme          *BlogTheme   `json:"theme"`
 }
 
 func (b *Blog) UnmarshalJSON(data []byte) error {
@@ -89,9 +90,10 @@ func (b *Blog) UnmarshalJSON(data []byte) error {
 	}
 	*b = Blog(alias)
 	var extra struct {
-		BlogViewURL string `json:"blog_view_url"`
-		CanMessage  *bool  `json:"can_message"`
-		IsAdult     *bool  `json:"is_adult"`
+		BlogViewURL    string `json:"blog_view_url"`
+		CanMessage     *bool  `json:"can_message"`
+		IsGroupChannel *bool  `json:"is_group_channel"`
+		IsAdult        *bool  `json:"is_adult"`
 	}
 	if err := json.Unmarshal(data, &extra); err != nil {
 		return err
@@ -101,6 +103,9 @@ func (b *Blog) UnmarshalJSON(data []byte) error {
 	}
 	if extra.CanMessage != nil {
 		b.CanMessage = *extra.CanMessage
+	}
+	if extra.IsGroupChannel != nil {
+		b.IsGroupChannel = *extra.IsGroupChannel
 	}
 	if extra.IsAdult != nil {
 		b.IsAdult = *extra.IsAdult

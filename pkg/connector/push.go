@@ -51,6 +51,12 @@ type webPushPayload struct {
 	ContentEncoding string          `json:"content-encoding"`
 }
 
+type tumblrConversationPush struct {
+	ConversationID string
+	FromBlogName   string
+	ToBlogName     string
+}
+
 func (tc *TumblrClient) GetPushConfigs() *bridgev2.PushConfig {
 	return tumblrPushConfig
 }
@@ -953,30 +959,48 @@ func pushRegistrationByToken(keys *PushKeys, token string) *PushRegistration {
 }
 
 func (tc *TumblrClient) handleWebPushPayload(ctx context.Context, data json.RawMessage) error {
-	conversationID, err := tc.conversationIDFromPushPayload(data)
+	conversationPush, err := tc.conversationFromPushPayload(data)
 	if err != nil {
 		return err
 	}
-	if log := tc.log(); log != nil {
-		log.Info().Str("conversation_id_hash", logIdentifierHash(conversationID)).Msg("Handling Tumblr push for conversation")
+	if conversationPush.FromBlogName != "" || conversationPush.ToBlogName != "" {
+		meta, metaErr := tc.validatedLoginMetadata()
+		if metaErr != nil {
+			return metaErr
+		}
+		selectedBlogName := tumblr.NormalizeBlogName(meta.SelectedBlogName)
+		if selectedBlogName != conversationPush.FromBlogName && selectedBlogName != conversationPush.ToBlogName {
+			if log := tc.log(); log != nil {
+				log.Info().
+					Str("conversation_id_hash", logIdentifierHash(conversationPush.ConversationID)).
+					Msg("Ignoring Tumblr push routed to another blog")
+			}
+			return nil
+		}
 	}
-	return tc.enqueueConversationSync(ctx, conversationID)
+	if log := tc.log(); log != nil {
+		log.Info().Str("conversation_id_hash", logIdentifierHash(conversationPush.ConversationID)).Msg("Handling Tumblr push for conversation")
+	}
+	return tc.enqueueConversationSync(ctx, conversationPush.ConversationID)
 }
 
-func (tc *TumblrClient) conversationIDFromPushPayload(data json.RawMessage) (string, error) {
+func (tc *TumblrClient) conversationFromPushPayload(data json.RawMessage) (tumblrConversationPush, error) {
 	payload, err := tc.decodePushPayload(data)
 	if err != nil {
-		return "", err
+		return tumblrConversationPush{}, err
 	}
 	value, err := decodePushJSON(payload)
 	if err != nil {
-		return "", err
+		return tumblrConversationPush{}, err
 	}
-	conversationID := findConversationID(value)
-	if !validRemoteID(conversationID) {
-		return "", fmt.Errorf("tumblr push payload did not include a valid conversation ID")
+	conversationPush, found := findViewConversationPush(value)
+	if !found {
+		conversationPush.ConversationID = findConversationID(value)
 	}
-	return conversationID, nil
+	if !validRemoteID(conversationPush.ConversationID) {
+		return tumblrConversationPush{}, fmt.Errorf("tumblr push payload did not include a valid conversation ID")
+	}
+	return conversationPush, nil
 }
 
 func (tc *TumblrClient) decodePushPayload(data json.RawMessage) ([]byte, error) {
@@ -1074,6 +1098,41 @@ func decodePushJSON(data []byte) (any, error) {
 		return nil, fmt.Errorf("failed to parse Tumblr push JSON: %w", err)
 	}
 	return value, nil
+}
+
+func findViewConversationPush(value any) (tumblrConversationPush, bool) {
+	switch typed := value.(type) {
+	case map[string]any:
+		if actionType, ok := typed["type"].(string); ok && strings.EqualFold(strings.TrimSpace(actionType), "VIEW_CONVERSATION") {
+			if params, ok := typed["params"].(map[string]any); ok {
+				conversationID := stringifyConversationID(params["conversation_id"])
+				if conversationID != "" {
+					return tumblrConversationPush{
+						ConversationID: conversationID,
+						FromBlogName:   normalizePushBlogName(params["from_tumblelog_name"]),
+						ToBlogName:     normalizePushBlogName(params["to_tumblelog_name"]),
+					}, true
+				}
+			}
+		}
+		for _, val := range typed {
+			if conversationPush, found := findViewConversationPush(val); found {
+				return conversationPush, true
+			}
+		}
+	case []any:
+		for _, val := range typed {
+			if conversationPush, found := findViewConversationPush(val); found {
+				return conversationPush, true
+			}
+		}
+	}
+	return tumblrConversationPush{}, false
+}
+
+func normalizePushBlogName(value any) string {
+	blogName, _ := value.(string)
+	return tumblr.NormalizeBlogName(blogName)
 }
 
 func findConversationID(value any) string {

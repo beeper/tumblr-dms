@@ -26,10 +26,12 @@ var (
 )
 
 type Error struct {
-	StatusCode int
-	Status     string
-	Errors     []APIError
-	Body       string
+	StatusCode      int
+	Status          string
+	Errors          []APIError
+	Body            string
+	ErrorCode       string
+	CaptchaRequired bool
 }
 
 // MessageSendError records whether Tumblr definitely rejected a message or
