@@ -18,6 +18,9 @@ const (
 	tumblrReconciliationInterval         = 5 * time.Minute
 	tumblrDeletionReconciliationInterval = 5 * time.Minute
 	tumblrDeletionReconciliationStart    = 30 * time.Second
+	tumblrConversationHeadProbeDefault   = 30 * time.Second
+	tumblrConversationHeadProbeIdle      = time.Minute
+	tumblrConversationHeadProbeHotWindow = 5 * time.Minute
 	tumblrJobPollInterval                = 2 * time.Second
 	tumblrJobRetryBase                   = 2 * time.Second
 	tumblrJobRetryMax                    = 5 * time.Minute
@@ -115,6 +118,10 @@ func (tc *TumblrClient) inboundSyncLoop(generation *connectionGeneration, wake <
 	defer poll.Stop()
 	reconcile := time.NewTimer(0)
 	defer reconcile.Stop()
+	headProbe := time.NewTimer(tumblrConversationHeadProbeDefault)
+	defer headProbe.Stop()
+	observedHeads := make(map[string]string)
+	headProbeHotUntil := time.Time{}
 	deletionReconcile := time.NewTimer(jitterDuration(
 		tumblrDeletionReconciliationStart,
 		tumblrDeletionReconciliationStart,
@@ -131,6 +138,29 @@ func (tc *TumblrClient) inboundSyncLoop(generation *connectionGeneration, wake <
 			return
 		case <-wake:
 		case <-poll.C:
+		case <-headProbe.C:
+			latestModifiedTS, changed, err := tc.probeChangedConversationHeads(ctx, observedHeads)
+			now := time.Now()
+			nextProbe := tumblrConversationHeadProbeIdle
+			if err != nil {
+				headProbeHotUntil = time.Time{}
+				if ctx.Err() == nil {
+					if log := tc.log(); log != nil {
+						log.Warn().Err(err).Msg("Tumblr conversation head probe failed")
+					}
+				}
+			} else {
+				if changed {
+					headProbeHotUntil = now.Add(tumblrConversationHeadProbeHotWindow)
+				}
+				if now.Before(headProbeHotUntil) {
+					nextProbe = tumblrConversationHeadProbeDelay(now, latestModifiedTS)
+					if nextProbe >= tumblrConversationHeadProbeIdle {
+						headProbeHotUntil = time.Time{}
+					}
+				}
+			}
+			headProbe.Reset(nextProbe)
 		case <-reconcile.C:
 			if err := tc.reconcileConversationHead(ctx); err != nil && ctx.Err() == nil {
 				if log := tc.log(); log != nil {
@@ -144,12 +174,115 @@ func (tc *TumblrClient) inboundSyncLoop(generation *connectionGeneration, wake <
 					log.Warn().Err(err).Msg("Tumblr conversation deletion reconciliation failed")
 				}
 			}
+			clear(observedHeads)
 			deletionReconcile.Reset(jitterDuration(
 				tumblrDeletionReconciliationInterval,
 				tumblrDeletionReconciliationInterval/5,
 			))
 		}
 	}
+}
+
+func tumblrConversationHeadProbeDelay(now time.Time, latestModifiedTS int64) time.Duration {
+	if latestModifiedTS <= 0 {
+		return tumblrConversationHeadProbeDefault
+	}
+	age := now.Sub(time.Unix(latestModifiedTS, 0))
+	switch {
+	case age < 30*time.Second:
+		return 2 * time.Second
+	case age < time.Minute:
+		return 5 * time.Second
+	case age < 2*time.Minute:
+		return 10 * time.Second
+	case age < 5*time.Minute:
+		return 30 * time.Second
+	default:
+		return time.Minute
+	}
+}
+
+func (tc *TumblrClient) probeChangedConversationHeads(ctx context.Context, observedHeads map[string]string) (int64, bool, error) {
+	if err := tc.requireLoggedIn(); err != nil {
+		return 0, false, err
+	}
+	meta, err := tc.validatedLoginMetadata()
+	if err != nil {
+		return 0, false, err
+	}
+	client, err := tc.tumblrClient()
+	if err != nil {
+		return 0, false, err
+	}
+	// The official client polls one server-sized first page without a limit.
+	resp, err := client.ListConversations(ctx, meta.SelectedBlogUUID, 0)
+	if err != nil {
+		return 0, false, tc.handleRemoteError(err)
+	}
+
+	latestModifiedTS := int64(0)
+	queued := false
+	nextObservedHeads := make(map[string]string, len(resp.Conversations))
+	for _, conversation := range resp.Conversations {
+		latestModifiedTS = max(latestModifiedTS, conversation.LastModifiedTimestamp)
+		if !validRemoteID(conversation.ID) {
+			continue
+		}
+		headMessageID := conversationPageHeadMessageID(conversation.Messages.Data)
+		if !validRemoteID(headMessageID) {
+			continue
+		}
+		if observedHeads[conversation.ID] == headMessageID {
+			nextObservedHeads[conversation.ID] = headMessageID
+			continue
+		}
+		changed, queueErr := tc.queueChangedConversationHead(ctx, conversation.ID, headMessageID)
+		if queueErr != nil {
+			return latestModifiedTS, queued, queueErr
+		}
+		nextObservedHeads[conversation.ID] = headMessageID
+		if changed {
+			queued = true
+		}
+	}
+	if queued {
+		tc.wakeInboundSync()
+	}
+	clear(observedHeads)
+	for conversationID, headMessageID := range nextObservedHeads {
+		observedHeads[conversationID] = headMessageID
+	}
+	return latestModifiedTS, queued, nil
+}
+
+// queueChangedConversationHead checks the completed boundary and any existing
+// durable work under the same submission fence used by the sync worker. This
+// keeps the fast probe from superseding an in-flight job on every poll.
+func (tc *TumblrClient) queueChangedConversationHead(ctx context.Context, conversationID, headMessageID string) (bool, error) {
+	lockCtx, releaseSubmission, err := tc.acquireOutboundSubmissionLock(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer releaseSubmission()
+
+	state, err := tc.connector.DB.ConversationSync.Get(lockCtx, tc.userLogin.ID, conversationID)
+	if err != nil {
+		return false, err
+	}
+	job, err := tc.connector.DB.Jobs.Get(lockCtx, tc.userLogin.ID, conversationID)
+	if err != nil {
+		return false, err
+	}
+	if job != nil && job.DeleteRoomID != "" {
+		return true, tc.connector.DB.Jobs.PutLiveConversation(lockCtx, tc.userLogin.ID, conversationID)
+	}
+	if job != nil {
+		return false, nil
+	}
+	if state != nil && state.CompletedHeadMessageID == headMessageID {
+		return false, nil
+	}
+	return true, tc.connector.DB.Jobs.PutLiveConversation(lockCtx, tc.userLogin.ID, conversationID)
 }
 
 func (tc *TumblrClient) processDueConversationJobs(ctx context.Context, limit int) error {

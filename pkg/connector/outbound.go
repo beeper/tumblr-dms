@@ -1550,6 +1550,98 @@ func (tc *TumblrClient) reconcileOutboundConversation(ctx context.Context, conve
 	return result, nil
 }
 
+// claimOutboundSendResponseLocked opportunistically claims the message created
+// by a successful POST. The response can be partial, so it is only authoritative
+// when exactly one returned message passes the same strict candidate check used
+// by full conversation reconciliation and no other pending send can claim it.
+// The caller holds the per-login submission fence and outboundGraphLock.
+func (tc *TumblrClient) claimOutboundSendResponseLocked(
+	ctx context.Context,
+	send *tumblrdb.OutboundSend,
+	conversation *tumblr.Conversation,
+) error {
+	if send == nil || conversation == nil || conversation.ID != send.ConversationID {
+		return nil
+	}
+	unbound, err := tc.connector.DB.Outbound.ListUnbound(ctx, tc.userLogin.ID)
+	if err != nil {
+		return err
+	}
+	for _, candidate := range unbound {
+		if candidate.TransactionID != send.TransactionID && tc.outboundPortalMatchesConversation(candidate.PortalKey, *conversation) {
+			return nil
+		}
+	}
+	matchable, err := tc.connector.DB.Outbound.ListMatchable(ctx, tc.userLogin.ID, conversation.ID)
+	if err != nil {
+		return err
+	}
+	currentSendIsMatchable := false
+	for _, candidate := range matchable {
+		if candidate.TransactionID == send.TransactionID {
+			currentSendIsMatchable = true
+			break
+		}
+	}
+	if !currentSendIsMatchable {
+		return nil
+	}
+
+	matchedMessageID := ""
+	for index := range conversation.Messages.Data {
+		message := &conversation.Messages.Data[index]
+		candidate, candidateErr := tc.outboundMessageCandidate(ctx, send, message, true)
+		if candidateErr != nil {
+			return candidateErr
+		}
+		if candidate.indeterminate {
+			return nil
+		}
+		if !candidate.match {
+			continue
+		}
+		if matchedMessageID != "" {
+			return nil
+		}
+		for _, competingSend := range matchable {
+			if competingSend.TransactionID == send.TransactionID {
+				continue
+			}
+			competing, competingErr := tc.outboundMessageCandidate(ctx, competingSend, message, true)
+			if competingErr != nil {
+				return competingErr
+			}
+			if competing.match || competing.indeterminate {
+				return nil
+			}
+		}
+		matchedMessageID = message.ID
+	}
+	if matchedMessageID == "" {
+		return nil
+	}
+
+	claimed, err := tc.connector.DB.Outbound.ClaimRemoteMessage(
+		ctx,
+		tc.userLogin.ID,
+		send.TransactionID,
+		conversation.ID,
+		tumblrid.MakeMessageID(matchedMessageID),
+		time.Now().Add(outboundResolvedDelay),
+	)
+	if err != nil || claimed {
+		return err
+	}
+	reloaded, err := tc.connector.DB.Outbound.Get(ctx, tc.userLogin.ID, send.TransactionID)
+	if err != nil {
+		return err
+	}
+	if reloaded == nil || reloaded.State != tumblrdb.OutboundSendResolved || string(reloaded.RemoteMessageID) != matchedMessageID {
+		return fmt.Errorf("tumblr outbound candidate graph changed while claiming the send response")
+	}
+	return nil
+}
+
 func (tc *TumblrClient) outboundMessageCandidate(ctx context.Context, send *tumblrdb.OutboundSend, message *tumblr.Message, verifyImage bool) (outboundCandidateResult, error) {
 	if send == nil || message == nil || !validOutboundRemoteMessageID(message.ID) ||
 		strings.EqualFold(message.ID, string(send.RemoteMessageID)) {

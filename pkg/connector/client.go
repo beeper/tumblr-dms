@@ -1017,6 +1017,17 @@ func (tc *TumblrClient) sendMatrixMessageToTumblr(ctx context.Context, msg *brid
 	); err != nil {
 		return tc.keepOutboundPendingAfterSubmit(ctx, persisted, dbMessage, err)
 	}
+	if resp != nil && resp.Conversation != nil && resp.Conversation.ID == conversationID {
+		if reconcileErr := tc.claimOutboundSendResponseLocked(
+			ctx,
+			persisted,
+			resp.Conversation,
+		); reconcileErr != nil {
+			if log := tc.log(); log != nil {
+				log.Warn().Err(reconcileErr).Msg("Could not reconcile the Tumblr send response")
+			}
+		}
+	}
 	tc.wakeOutboundSync()
 	return &bridgev2.MatrixMessageResponse{
 		DB:      dbMessage,
