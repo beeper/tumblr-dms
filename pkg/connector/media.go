@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/matrix"
@@ -356,12 +357,23 @@ func downloadMatrixMediaBounded(
 	file *event.EncryptedFileInfo,
 	maxBytes int64,
 ) ([]byte, error) {
-	// MatrixAPI's generic download helpers do not accept a byte limit. Use the
-	// same authenticated appservice intent while bounding the response stream.
 	asIntent, ok := intent.(*matrix.ASIntent)
 	if !ok || asIntent.Matrix == nil {
-		return nil, fmt.Errorf("bounded matrix media downloader is not available")
+		var data []byte
+		err := intent.DownloadMediaToFile(ctx, uri, file, false, func(download *os.File) error {
+			var err error
+			data, err = io.ReadAll(io.LimitReader(download, maxBytes+1))
+			if err != nil {
+				return fmt.Errorf("read downloaded media: %w", err)
+			}
+			if int64(len(data)) > maxBytes {
+				return errMatrixImageTooLarge
+			}
+			return nil
+		})
+		return data, err
 	}
+
 	if file != nil {
 		uri = file.URL
 		if err := file.PrepareForDecryption(); err != nil {

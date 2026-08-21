@@ -1,4 +1,4 @@
-//go:build !android && !darwin && !dragonfly && !freebsd && !linux && !netbsd && !openbsd && !solaris
+//go:build !android && !darwin && !dragonfly && !freebsd && !linux && !netbsd && !openbsd && !solaris && !windows
 
 package tumblrdb
 

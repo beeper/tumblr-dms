@@ -887,10 +887,6 @@ func (tc *TumblrClient) sendOutboundStatusWithCertainty(
 	if send.MessageType == tumblrdb.OutboundMessageImage {
 		msgType = event.MsgImage
 	}
-	matrixConnector, ok := tc.connector.Bridge.Matrix.(*matrix.Connector)
-	if !ok || matrixConnector == nil || matrixConnector.Bot == nil || matrixConnector.Config == nil {
-		return fmt.Errorf("synchronous matrix status sender is unavailable")
-	}
 	if send.MatrixEventID == "" {
 		return fmt.Errorf("matrix event for Tumblr outbound status is unavailable")
 	}
@@ -907,6 +903,14 @@ func (tc *TumblrClient) sendOutboundStatusWithCertainty(
 		EventType:     event.EventMessage,
 		MessageType:   msgType,
 		Sender:        send.MatrixSenderID,
+	}
+	matrixConnector, ok := tc.connector.Bridge.Matrix.(*matrix.Connector)
+	if !ok {
+		tc.connector.Bridge.Matrix.SendMessageStatus(ctx, messageStatusInfo, eventInfo)
+		return nil
+	}
+	if matrixConnector == nil || matrixConnector.Bot == nil || matrixConnector.Config == nil {
+		return fmt.Errorf("synchronous matrix status sender is unavailable")
 	}
 
 	if err := matrixConnector.SendMessageCheckpoints(ctx, []*status.MessageCheckpoint{messageStatusInfo.ToCheckpoint(eventInfo)}); err != nil {
