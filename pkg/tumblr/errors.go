@@ -167,6 +167,7 @@ type BootstrapError struct {
 	Message    string
 	Auth       bool
 	Incomplete bool
+	cause      error
 }
 
 func (e *BootstrapError) Error() string {
@@ -176,12 +177,32 @@ func (e *BootstrapError) Error() string {
 	return e.Message
 }
 
+func (e *BootstrapError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
 func (e *BootstrapError) IsAuthError() bool {
 	return e != nil && e.Auth
 }
 
 func (e *BootstrapError) IsIncompleteSession() bool {
 	return e != nil && e.Incomplete
+}
+
+type requestError struct {
+	message string
+	cause   error
+}
+
+func (e *requestError) Error() string {
+	return e.message
+}
+
+func (e *requestError) Unwrap() error {
+	return e.cause
 }
 
 func safeErrorDetail(input string) string {

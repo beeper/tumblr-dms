@@ -110,10 +110,11 @@ func tumblrCookieSources(name string) []bridgev2.LoginCookieFieldSource {
 }
 
 type TumblrLogin struct {
-	User     *bridgev2.User
-	tc       *TumblrConnector
-	flow     string
-	override *bridgev2.UserLogin
+	User      *bridgev2.User
+	tc        *TumblrConnector
+	flow      string
+	override  *bridgev2.UserLogin
+	transport http.RoundTripper
 
 	step             string
 	client           *tumblr.Client
@@ -139,6 +140,7 @@ func lockTumblrReauthentication(loginID networkid.UserLoginID) func() {
 var _ bridgev2.LoginProcessCookies = (*TumblrLogin)(nil)
 var _ bridgev2.LoginProcessUserInput = (*TumblrLogin)(nil)
 var _ bridgev2.LoginProcessWithOverride = (*TumblrLogin)(nil)
+var _ bridgev2.LoginProcessWithParams = (*TumblrLogin)(nil)
 
 func (tc *TumblrConnector) GetLoginFlows() []bridgev2.LoginFlow {
 	return []bridgev2.LoginFlow{
@@ -166,32 +168,42 @@ func (tc *TumblrConnector) CreateLogin(_ context.Context, user *bridgev2.User, f
 	return &TumblrLogin{User: user, tc: tc, flow: flowID}, nil
 }
 
-func (tl *TumblrLogin) Start(context.Context) (*bridgev2.LoginStep, error) {
-	if err := tl.validateConnector(); err != nil {
-		return nil, err
-	}
-	tl.reset()
-	if tl.flow == loginFlowPassword {
-		return tl.credentialsStep("Enter the email and password for your Tumblr account."), nil
-	}
-	return tl.cookieStep(loginInstructions), nil
+func (tl *TumblrLogin) Start(ctx context.Context) (*bridgev2.LoginStep, error) {
+	return tl.StartWithParams(ctx, bridgev2.LoginStartParams{})
 }
 
-func (tl *TumblrLogin) StartWithOverride(_ context.Context, override *bridgev2.UserLogin) (*bridgev2.LoginStep, error) {
+func (tl *TumblrLogin) StartWithOverride(ctx context.Context, override *bridgev2.UserLogin) (*bridgev2.LoginStep, error) {
+	if override == nil {
+		return nil, fmt.Errorf("tumblr login to reconnect is missing")
+	}
+	return tl.StartWithParams(ctx, bridgev2.LoginStartParams{Override: override})
+}
+
+func (tl *TumblrLogin) StartWithParams(_ context.Context, params bridgev2.LoginStartParams) (*bridgev2.LoginStep, error) {
 	if err := tl.validateConnector(); err != nil {
 		return nil, err
 	}
-	if override == nil || override.UserLogin == nil {
+	if params.Override != nil && params.Override.UserLogin == nil {
 		return nil, fmt.Errorf("tumblr login to reconnect is missing")
 	}
-	if tl.User == nil || override.UserMXID != tl.User.MXID {
+	if params.Override != nil && (tl.User == nil || params.Override.UserMXID != tl.User.MXID) {
 		return nil, fmt.Errorf("tumblr login does not belong to this matrix user")
 	}
 	tl.reset()
-	tl.override = override
+	tl.override = params.Override
+	tl.transport = params.HTTP
+	if tl.User != nil {
+		tl.User.Log.Debug().Bool("client_http", tl.transport != nil).Msg("Starting Tumblr login flow")
+	}
+	if tl.override == nil {
+		if tl.flow == loginFlowPassword {
+			return tl.credentialsStep("Enter the email and password for your Tumblr account."), nil
+		}
+		return tl.cookieStep(loginInstructions), nil
+	}
 	loginName := "this Tumblr blog"
-	if override != nil && strings.TrimSpace(override.RemoteName) != "" {
-		loginName = "@" + strings.TrimPrefix(strings.TrimSpace(override.RemoteName), "@")
+	if strings.TrimSpace(tl.override.RemoteName) != "" {
+		loginName = "@" + strings.TrimPrefix(strings.TrimSpace(tl.override.RemoteName), "@")
 	}
 	instructions := fmt.Sprintf("Sign in to Tumblr again to reconnect %s. This refreshes the saved session and keeps the same sending blog.", loginName)
 	if tl.flow == loginFlowPassword {
@@ -205,6 +217,15 @@ func (tl *TumblrLogin) reset() {
 	tl.clearPendingAuthentication()
 	tl.browserAttempt = 0
 	tl.override = nil
+	tl.transport = nil
+}
+
+func (tl *TumblrLogin) newLoginHTTPClient() *http.Client {
+	client := tl.tc.newHTTPClient()
+	if tl.transport != nil {
+		client.Transport = tl.transport
+	}
+	return client
 }
 
 func (tl *TumblrLogin) clearPendingAuthentication() {
@@ -216,6 +237,25 @@ func (tl *TumblrLogin) clearPendingAuthentication() {
 	tl.password = ""
 	tl.twoFactor = ""
 	tl.browserUserAgent = ""
+}
+
+func (tl *TumblrLogin) clientHTTPRetryStep() *bridgev2.LoginStep {
+	retryCookies := tl.step == loginStepIDCookies || tl.flow == loginFlowCookies
+	tl.clearPendingAuthentication()
+	if retryCookies {
+		return tl.cookieStep("The request did not complete on this device. Please try again.")
+	}
+	return tl.credentialsStep("The request did not complete on this device. Please try again.")
+}
+
+func tumblrClientHTTPError(err error) bool {
+	for err != nil {
+		if strings.HasPrefix(err.Error(), "error from client: ") {
+			return true
+		}
+		err = errors.Unwrap(err)
+	}
+	return false
 }
 
 func (tl *TumblrLogin) credentialsStep(instructions string) *bridgev2.LoginStep {
@@ -471,6 +511,9 @@ func (tl *TumblrLogin) submitPassword(ctx context.Context, blackboxSessionID str
 		BlackboxSessionID: blackboxSessionID,
 	})
 	if err != nil {
+		if tumblrClientHTTPError(err) {
+			return tl.clientHTTPRetryStep(), nil
+		}
 		tl.logPasswordLoginRejection(err, blackboxSessionID)
 		needsTwoFactor := tumblr.LoginNeedsTwoFactor(err)
 		needsCaptcha := tumblr.LoginNeedsCaptcha(err)
@@ -549,9 +592,12 @@ func (tl *TumblrLogin) submitBrowserVerification(ctx context.Context, input map[
 	if tl.client == nil {
 		client := tumblr.NewClient(tumblr.Options{
 			UserAgent:  browserUserAgent,
-			HTTPClient: tl.tc.newHTTPClient(),
+			HTTPClient: tl.newLoginHTTPClient(),
 		})
 		if err := client.PrepareLogin(ctx); err != nil {
+			if tumblrClientHTTPError(err) {
+				return tl.clientHTTPRetryStep(), nil
+			}
 			tl.clearPendingAuthentication()
 			tl.logValidationError(err)
 			return nil, tumblrLoginValidationError(err)
@@ -582,7 +628,7 @@ func (tl *TumblrLogin) submitCookieInput(ctx context.Context, cookies map[string
 		CSRFToken:      csrfToken,
 		APIVersion:     apiVersion,
 		UserAgent:      browserUserAgent,
-		HTTPClient:     tl.tc.newHTTPClient(),
+		HTTPClient:     tl.newLoginHTTPClient(),
 	})
 	tl.browserUserAgent = browserUserAgent
 	return tl.finishAuthentication(ctx, client)
@@ -600,6 +646,9 @@ func (tl *TumblrLogin) finishAuthentication(ctx context.Context, client *tumblr.
 		defer unlock()
 	}
 	if err := client.Bootstrap(ctx); err != nil {
+		if tumblrClientHTTPError(err) {
+			return tl.clientHTTPRetryStep(), nil
+		}
 		tl.logValidationError(err)
 		return nil, tumblrLoginValidationError(err)
 	}
@@ -608,6 +657,9 @@ func (tl *TumblrLogin) finishAuthentication(ctx context.Context, client *tumblr.
 	}
 	userInfo, err := client.CurrentUser(ctx)
 	if err != nil {
+		if tumblrClientHTTPError(err) {
+			return tl.clientHTTPRetryStep(), nil
+		}
 		tl.logValidationError(err)
 		return nil, tumblrLoginValidationError(err)
 	}

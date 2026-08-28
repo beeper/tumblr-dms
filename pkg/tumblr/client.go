@@ -563,7 +563,7 @@ func (c *Client) bootstrap(ctx context.Context) error {
 		if resp != nil && resp.Body != nil {
 			resp.Body.Close()
 		}
-		return &BootstrapError{Message: "Tumblr messaging page request failed"}
+		return &BootstrapError{Message: "Tumblr messaging page request failed", cause: err}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -1540,7 +1540,7 @@ func (c *Client) doOnceWithRedirectPolicy(ctx context.Context, method, path stri
 		if resp != nil && resp.Body != nil {
 			resp.Body.Close()
 		}
-		return fmt.Errorf("tumblr API request failed")
+		return &requestError{message: "tumblr API request failed", cause: err}
 	}
 	defer resp.Body.Close()
 	if csrf := responseCSRFToken(resp.Header); csrf != "" {
