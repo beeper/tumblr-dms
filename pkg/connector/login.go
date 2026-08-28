@@ -542,6 +542,10 @@ func (tl *TumblrLogin) submitBrowserVerification(ctx context.Context, input map[
 		tl.clearPendingAuthentication()
 		return tl.credentialsStep("Tumblr's secure sign-in check did not finish. Enter your credentials and try again."), nil
 	}
+	if tl.client != nil && tl.browserUserAgent != browserUserAgent {
+		tl.clearPendingAuthentication()
+		return tl.credentialsStep("Tumblr's secure sign-in browser changed. Enter your credentials and try again."), nil
+	}
 	if tl.client == nil {
 		client := tumblr.NewClient(tumblr.Options{
 			UserAgent:  browserUserAgent,
