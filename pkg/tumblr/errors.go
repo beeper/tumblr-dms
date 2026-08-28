@@ -163,6 +163,7 @@ func IsNotFound(err error) bool {
 }
 
 type BootstrapError struct {
+	StatusCode int
 	Message    string
 	Auth       bool
 	Incomplete bool

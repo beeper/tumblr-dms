@@ -568,19 +568,20 @@ func (c *Client) bootstrap(ctx context.Context) error {
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return &BootstrapError{
-			Message: fmt.Sprintf("failed to load Tumblr messaging page: HTTP %d", resp.StatusCode),
-			Auth:    resp.StatusCode == http.StatusUnauthorized,
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("failed to load Tumblr messaging page: HTTP %d", resp.StatusCode),
+			Auth:       resp.StatusCode == http.StatusUnauthorized,
 		}
 	}
 	if isLoginPath(resp.Request.URL.Path) {
-		return &BootstrapError{Message: "Tumblr session is not logged in", Auth: true}
+		return &BootstrapError{StatusCode: http.StatusUnauthorized, Message: "Tumblr session is not logged in", Auth: true}
 	}
 	body, err := readLimitedBody(resp.Body, maxBootstrapPageBytes, "Tumblr messaging page")
 	if err != nil {
 		return err
 	}
 	if loggedOutRe.Match(body) {
-		return &BootstrapError{Message: "Tumblr session is not logged in", Auth: true}
+		return &BootstrapError{StatusCode: http.StatusUnauthorized, Message: "Tumblr session is not logged in", Auth: true}
 	}
 	return c.bootstrapFromHTML(string(body))
 }

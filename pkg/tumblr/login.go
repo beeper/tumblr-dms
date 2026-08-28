@@ -35,7 +35,10 @@ func (c *Client) PrepareLogin(ctx context.Context) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &BootstrapError{Message: fmt.Sprintf("failed to load Tumblr login page: HTTP %d", resp.StatusCode)}
+		return &BootstrapError{
+			StatusCode: resp.StatusCode,
+			Message:    fmt.Sprintf("failed to load Tumblr login page: HTTP %d", resp.StatusCode),
+		}
 	}
 	body, err := readLimitedBody(resp.Body, maxBootstrapPageBytes, "Tumblr login page")
 	if err != nil {

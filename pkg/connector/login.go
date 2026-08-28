@@ -3,8 +3,10 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -25,6 +27,7 @@ const (
 	loginStepIDCredentials         = "com.ifixrobots.tumblr_dms.login.credentials"
 	loginStepIDTwoFactor           = "com.ifixrobots.tumblr_dms.login.two_factor"
 	loginStepIDBrowserVerification = "com.ifixrobots.tumblr_dms.login.browser_verification"
+	loginStepIDCaptcha             = "com.ifixrobots.tumblr_dms.login.captcha"
 	loginStepIDBlog                = "com.ifixrobots.tumblr_dms.login.blog"
 	loginStepIDCookies             = "com.ifixrobots.tumblr_dms.login.cookies"
 	loginStepIDComplete            = "com.ifixrobots.tumblr_dms.login.complete"
@@ -98,6 +101,8 @@ var tumblrBrowserSessionCookieFields = []bridgev2.LoginCookieField{
 		Sources:  tumblrCookieSources("tmgioct"),
 	},
 }
+
+var tumblrLoginEmailPattern = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
 
 func tumblrCookieSources(name string) []bridgev2.LoginCookieFieldSource {
 	return []bridgev2.LoginCookieFieldSource{{
@@ -228,9 +233,10 @@ func (tl *TumblrLogin) credentialsStep(instructions string) *bridgev2.LoginStep 
 		Instructions: instructions,
 		UserInputParams: &bridgev2.LoginUserInputParams{Fields: []bridgev2.LoginInputDataField{
 			{
-				Type: bridgev2.LoginInputFieldTypeEmail,
-				ID:   loginFieldIdentifier,
-				Name: "Email",
+				Type:    bridgev2.LoginInputFieldTypeEmail,
+				ID:      loginFieldIdentifier,
+				Name:    "Email",
+				Pattern: tumblrLoginEmailPattern.String(),
 			},
 			{
 				Type: bridgev2.LoginInputFieldTypePassword,
@@ -261,9 +267,10 @@ func (tl *TumblrLogin) browserVerificationStep(instructions string) (*bridgev2.L
 	if tl.client == nil {
 		return nil, fmt.Errorf("tumblr browser verification client is missing")
 	}
+	needsCaptcha := tl.captchaRequired
 	tl.browserAttempt++
 	attempt := tl.browserAttempt
-	extractJS, err := tumblrBrowserVerificationExtractionJS(tl.client.RecaptchaSiteKey(), tl.captchaRequired, attempt)
+	extractJS, err := tumblrBrowserVerificationExtractionJS(tl.client.RecaptchaSiteKey(), needsCaptcha, attempt)
 	if err != nil {
 		return nil, err
 	}
@@ -275,7 +282,7 @@ func (tl *TumblrLogin) browserVerificationStep(instructions string) (*bridgev2.L
 			Name: loginFieldBlackbox,
 		}},
 	}}
-	if tl.captchaRequired {
+	if needsCaptcha {
 		fields = append(fields, bridgev2.LoginCookieField{
 			ID:       loginFieldCaptcha,
 			Required: true,
@@ -285,15 +292,23 @@ func (tl *TumblrLogin) browserVerificationStep(instructions string) (*bridgev2.L
 			}},
 		})
 	}
-	tl.step = loginStepIDBrowserVerification
+	stepID := loginStepIDBrowserVerification
+	urlFragment := fmt.Sprintf("beeper-native-login-blackbox-%d", attempt)
+	hidden := true
+	if needsCaptcha {
+		stepID = loginStepIDCaptcha
+		urlFragment = "beeper-native-login-captcha"
+		hidden = false
+	}
+	tl.step = stepID
 	return &bridgev2.LoginStep{
 		Type:         bridgev2.LoginStepTypeCookies,
-		StepID:       loginStepIDBrowserVerification,
+		StepID:       stepID,
 		Instructions: instructions,
 		CookiesParams: &bridgev2.LoginCookiesParams{
-			URL:       fmt.Sprintf("https://www.tumblr.com/login#beeper-native-login-%d", attempt),
+			URL:       "https://www.tumblr.com/login#" + urlFragment,
 			UserAgent: tl.tc.Config.BrowserUserAgent(),
-			Hidden:    true,
+			Hidden:    hidden,
 			ExtractJS: extractJS,
 			Fields:    fields,
 		},
@@ -375,6 +390,19 @@ func tumblrBrowserVerificationExtractionJS(siteKey string, needsCaptcha bool, at
 		const empty = { blackbox_session_id: '' }
 		if (needsCaptcha) empty.captcha_token = ''
 		try {
+			if (needsCaptcha) {
+				await new Promise(resolveStart => {
+					const button = document.createElement('button')
+					button.textContent = 'Continue Tumblr security check'
+					button.style.cssText = 'position:fixed;inset:0;z-index:2147483647;border:0;' +
+						'background:#fff;color:#001935;font:600 18px sans-serif;cursor:pointer'
+					button.addEventListener('click', () => {
+						button.remove()
+						resolveStart()
+					}, { once: true })
+					;(document.body || document.documentElement).append(button)
+				})
+			}
 			const [blackboxSessionID, captchaToken] = await Promise.all([
 				collectBlackbox(),
 				needsCaptcha ? collectCaptcha() : Promise.resolve(''),
@@ -490,6 +518,12 @@ func (tl *TumblrLogin) submitCredentials(ctx context.Context, input map[string]s
 	if identifier == "" || password == "" {
 		return tl.credentialsStep("Enter both your Tumblr email and password."), nil
 	}
+	if !tumblrLoginEmailPattern.MatchString(identifier) {
+		if tl.User != nil {
+			tl.User.Log.Debug().Str("identifier_kind", "non_email").Msg("Rejected Tumblr native login identifier")
+		}
+		return tl.credentialsStep("Use the email address registered to your Tumblr account, not a blog name or username."), nil
+	}
 
 	client := tumblr.NewClient(tumblr.Options{
 		UserAgent:  tl.tc.Config.BrowserUserAgent(),
@@ -528,9 +562,14 @@ func (tl *TumblrLogin) submitPassword(ctx context.Context, blackboxSessionID, ca
 		BlackboxSessionID: blackboxSessionID,
 	})
 	if err != nil {
+		tl.logPasswordLoginRejection(err, blackboxSessionID, captchaToken)
 		needsTwoFactor := tumblr.LoginNeedsTwoFactor(err)
 		needsCaptcha := tumblr.LoginNeedsCaptcha(err)
+		captchaSubmitted := strings.TrimSpace(captchaToken) != ""
 		switch {
+		case tumblrLoginMustStopForStatus(err):
+			tl.clearPendingAuthentication()
+			return nil, tumblrLoginValidationError(err)
 		case tumblr.LoginRequiresPasswordReset(err):
 			tl.clearPendingAuthentication()
 			return nil, tumblrPasswordResetRequiredError()
@@ -540,22 +579,34 @@ func (tl *TumblrLogin) submitPassword(ctx context.Context, blackboxSessionID, ca
 		case tumblr.LoginAccountPendingDeletion(err):
 			tl.clearPendingAuthentication()
 			return nil, tumblrAccountPendingDeletionError()
-		case needsTwoFactor && tl.twoFactor != "":
+		case needsTwoFactor && tl.twoFactor == "":
+			tl.captchaRequired = needsCaptcha
+			return tl.twoFactorStep("Enter the code from your authenticator app, or use a single-use backup code."), nil
+		case needsCaptcha && captchaSubmitted:
+			tl.clearPendingAuthentication()
+			return tl.credentialsStep("Tumblr did not accept the security check. Wait a moment, then enter your credentials to try again."), nil
+		case needsTwoFactor:
 			tl.captchaRequired = needsCaptcha
 			tl.twoFactor = ""
 			return tl.twoFactorStep("That authentication code was not accepted. Check the code and try again."), nil
-		case needsTwoFactor:
-			tl.captchaRequired = needsCaptcha
-			return tl.twoFactorStep("Enter the code from your authenticator app, or use a single-use backup code."), nil
 		case needsCaptcha:
 			tl.captchaRequired = true
-			return tl.browserVerificationStep("Preparing Tumblr's secure sign-in.")
+			step, stepErr := tl.browserVerificationStep("Complete Tumblr's security check to continue signing in.")
+			if stepErr != nil {
+				tl.clearPendingAuthentication()
+				tl.logValidationError(stepErr)
+				return nil, tumblrLoginValidationError(stepErr)
+			}
+			return step, nil
 		case tumblr.IsLoginInputError(err) && tl.twoFactor != "":
 			tl.twoFactor = ""
 			return tl.twoFactorStep("That authentication code was not accepted. Check the code and try again."), nil
+		case tumblrLoginStatusCode(err) == http.StatusUnauthorized:
+			tl.clearPendingAuthentication()
+			return tl.credentialsStep("Tumblr did not accept that email and password. Check the registered account email and password and try again."), nil
 		case tumblr.IsLoginInputError(err):
 			tl.clearPendingAuthentication()
-			return tl.credentialsStep("Tumblr did not accept those credentials. Check them and try again."), nil
+			return tl.credentialsStep("Tumblr couldn't complete that sign-in. Make sure you're using the registered account email, not a blog name, and try again."), nil
 		default:
 			tl.clearPendingAuthentication()
 			tl.logValidationError(err)
@@ -581,18 +632,22 @@ func (tl *TumblrLogin) submitBlog(ctx context.Context, input map[string]string) 
 }
 
 func (tl *TumblrLogin) SubmitCookies(ctx context.Context, cookies map[string]string) (*bridgev2.LoginStep, error) {
-	if tl.step == loginStepIDBrowserVerification {
+	if tl.step == loginStepIDBrowserVerification || tl.step == loginStepIDCaptcha {
 		return tl.submitBrowserVerification(ctx, cookies)
 	}
 	return tl.submitCookieInput(ctx, cookies)
 }
 
 func (tl *TumblrLogin) submitBrowserVerification(ctx context.Context, input map[string]string) (*bridgev2.LoginStep, error) {
+	expectsCaptcha := tl.step == loginStepIDCaptcha && tl.captchaRequired
 	blackboxSessionID := strings.TrimSpace(input[loginFieldBlackbox])
 	captchaToken := strings.TrimSpace(input[loginFieldCaptcha])
-	if blackboxSessionID == "" || (tl.captchaRequired && captchaToken == "") {
+	if !expectsCaptcha {
+		captchaToken = ""
+	}
+	if blackboxSessionID == "" || (expectsCaptcha && captchaToken == "") {
 		tl.clearPendingAuthentication()
-		return tl.credentialsStep("Tumblr's secure sign-in check did not finish. Enter your credentials and try again, or use Browser sign-in."), nil
+		return tl.credentialsStep("Tumblr's secure sign-in check did not finish. Enter your credentials and try again."), nil
 	}
 	tl.captchaRequired = false
 	return tl.submitPassword(ctx, blackboxSessionID, captchaToken)
@@ -833,6 +888,50 @@ func (tl *TumblrLogin) logValidationError(err error) {
 	tl.User.Log.Debug().Err(err).Msg("Tumblr login validation failed")
 }
 
+func (tl *TumblrLogin) logPasswordLoginRejection(err error, blackboxSessionID, captchaToken string) {
+	if tl == nil || tl.User == nil || err == nil {
+		return
+	}
+	event := tl.User.Log.Debug().
+		Str("identifier_kind", "email").
+		Bool("blackbox_present", strings.TrimSpace(blackboxSessionID) != "").
+		Bool("captcha_token_present", strings.TrimSpace(captchaToken) != "")
+	var apiErr *tumblr.Error
+	if errors.As(err, &apiErr) {
+		event.Int("status_code", apiErr.StatusCode).
+			Bool("captcha_required", apiErr.CaptchaRequired)
+		codes := make([]int, 0, len(apiErr.Errors))
+		for _, item := range apiErr.Errors {
+			codes = append(codes, item.Code)
+		}
+		if len(codes) > 0 {
+			event.Ints("api_error_codes", codes)
+		}
+		switch apiErr.ErrorCode {
+		case "captcha_invalid", "tfa_invalid", "password_reset":
+			event.Str("error_code", apiErr.ErrorCode)
+		}
+	}
+	event.Msg("Tumblr native password login rejected")
+}
+
+func tumblrLoginStatusCode(err error) int {
+	var apiErr *tumblr.Error
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode
+	}
+	var bootstrapErr *tumblr.BootstrapError
+	if errors.As(err, &bootstrapErr) {
+		return bootstrapErr.StatusCode
+	}
+	return 0
+}
+
+func tumblrLoginMustStopForStatus(err error) bool {
+	statusCode := tumblrLoginStatusCode(err)
+	return statusCode == http.StatusTooManyRequests || statusCode >= http.StatusInternalServerError
+}
+
 func (tl *TumblrLogin) validateConnector() error {
 	if tl == nil || tl.tc == nil {
 		return fmt.Errorf("tumblr connector is missing")
@@ -841,6 +940,13 @@ func (tl *TumblrLogin) validateConnector() error {
 }
 
 func tumblrLoginValidationError(err error) error {
+	statusCode := tumblrLoginStatusCode(err)
+	if statusCode == http.StatusTooManyRequests {
+		return tumblrRateLimitedError()
+	}
+	if statusCode >= http.StatusInternalServerError {
+		return tumblrLoginUnavailableError()
+	}
 	if tumblr.IsAuthError(err) {
 		return bridgev2.RespError{
 			ErrCode:    "FI.MAU.TUMBLRDMS.BAD_CREDENTIALS",
@@ -858,10 +964,22 @@ func tumblrLoginValidationError(err error) error {
 			StatusCode: http.StatusForbidden,
 		}
 	}
+	return tumblrLoginUnavailableError()
+}
+
+func tumblrLoginUnavailableError() error {
 	return bridgev2.RespError{
 		ErrCode:    "FI.MAU.TUMBLRDMS.LOGIN_UNAVAILABLE",
 		Err:        "Tumblr couldn't be reached to finish signing in. Please try again.",
 		StatusCode: http.StatusBadGateway,
+	}
+}
+
+func tumblrRateLimitedError() error {
+	return bridgev2.RespError{
+		ErrCode:    "FI.MAU.TUMBLRDMS.RATE_LIMITED",
+		Err:        "Tumblr temporarily limited sign-in attempts. Wait a few minutes and try again.",
+		StatusCode: http.StatusTooManyRequests,
 	}
 }
 
