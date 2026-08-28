@@ -2,7 +2,7 @@ module github.com/ifixrobots/tumblr-dms
 
 go 1.26.0
 
-toolchain go1.26.5
+toolchain go1.26.7
 
 tool go.mau.fi/util/cmd/maubuild
 
