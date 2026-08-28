@@ -45,6 +45,7 @@ type UserLoginMetadata struct {
 	APIToken         string            `json:"api_token,omitempty"`
 	CSRFToken        string            `json:"csrf_token,omitempty"`
 	APIVersion       string            `json:"api_version,omitempty"`
+	UserAgent        string            `json:"user_agent,omitempty"`
 	UserName         string            `json:"user_name,omitempty"`
 	SelectedBlogName string            `json:"selected_blog_name,omitempty"`
 	SelectedBlogUUID string            `json:"selected_blog_uuid,omitempty"`
@@ -297,6 +298,7 @@ func normalizedUserLoginMetadata(raw any) (*UserLoginMetadata, error) {
 	normalized.APIToken = apiToken
 	normalized.CSRFToken = normalizeOptionalHeaderCredential(meta.CSRFToken)
 	normalized.APIVersion = normalizeOptionalHeaderCredential(meta.APIVersion)
+	normalized.UserAgent = normalizeOptionalHeaderCredential(meta.UserAgent)
 	normalized.UserName = normalizeOptionalMetadataBlogName(meta.UserName)
 	normalized.SelectedBlogName = selectedBlogName
 	normalized.SelectedBlogUUID = selectedBlogUUID

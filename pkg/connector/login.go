@@ -34,6 +34,7 @@ const (
 	loginFieldPassword   = "password"
 	loginFieldTwoFactor  = "two_factor"
 	loginFieldBlackbox   = "blackbox_session_id"
+	loginFieldUserAgent  = "browser_user_agent"
 	loginFieldBlog       = "blog"
 
 	loginInstructions = "Sign in to Tumblr in the window that opens, then open Messages. Beeper stores the session data needed to keep your DMs connected."
@@ -114,15 +115,16 @@ type TumblrLogin struct {
 	flow     string
 	override *bridgev2.UserLogin
 
-	step           string
-	client         *tumblr.Client
-	userInfo       *tumblr.UserInfoResponse
-	blogs          map[string]tumblr.Blog
-	blogOptions    []string
-	identifier     string
-	password       string
-	twoFactor      string
-	browserAttempt uint64
+	step             string
+	client           *tumblr.Client
+	userInfo         *tumblr.UserInfoResponse
+	blogs            map[string]tumblr.Blog
+	blogOptions      []string
+	identifier       string
+	password         string
+	twoFactor        string
+	browserUserAgent string
+	browserAttempt   uint64
 }
 
 var tumblrReauthLocks sync.Map
@@ -213,6 +215,7 @@ func (tl *TumblrLogin) clearPendingAuthentication() {
 	tl.identifier = ""
 	tl.password = ""
 	tl.twoFactor = ""
+	tl.browserUserAgent = ""
 }
 
 func (tl *TumblrLogin) credentialsStep(instructions string) *bridgev2.LoginStep {
@@ -256,14 +259,17 @@ func (tl *TumblrLogin) twoFactorStep(instructions string) *bridgev2.LoginStep {
 func (tl *TumblrLogin) browserVerificationStep(instructions string) *bridgev2.LoginStep {
 	tl.browserAttempt++
 	attempt := tl.browserAttempt
-	fields := []bridgev2.LoginCookieField{{
-		ID:       loginFieldBlackbox,
-		Required: true,
-		Sources: []bridgev2.LoginCookieFieldSource{{
-			Type: bridgev2.LoginCookieTypeSpecial,
-			Name: loginFieldBlackbox,
-		}},
-	}}
+	fields := []bridgev2.LoginCookieField{
+		{
+			ID:       loginFieldBlackbox,
+			Required: true,
+			Sources: []bridgev2.LoginCookieFieldSource{{
+				Type: bridgev2.LoginCookieTypeSpecial,
+				Name: loginFieldBlackbox,
+			}},
+		},
+		tumblrBrowserUserAgentField(),
+	}
 	urlFragment := fmt.Sprintf("beeper-native-login-blackbox-%d", attempt)
 	tl.step = loginStepIDBrowserVerification
 	return &bridgev2.LoginStep{
@@ -272,11 +278,23 @@ func (tl *TumblrLogin) browserVerificationStep(instructions string) *bridgev2.Lo
 		Instructions: instructions,
 		CookiesParams: &bridgev2.LoginCookiesParams{
 			URL:       "https://www.tumblr.com/login#" + urlFragment,
-			UserAgent: tl.tc.Config.BrowserUserAgent(),
 			Hidden:    true,
 			ExtractJS: tumblrBrowserVerificationExtractionJS(attempt),
 			Fields:    fields,
 		},
+	}
+}
+
+func tumblrBrowserUserAgentField() bridgev2.LoginCookieField {
+	return bridgev2.LoginCookieField{
+		ID:       loginFieldUserAgent,
+		Required: true,
+		Pattern:  `^[^\r\n]{1,1024}$`,
+		Sources: []bridgev2.LoginCookieFieldSource{{
+			Type:            bridgev2.LoginCookieTypeRequestHeader,
+			Name:            "user-agent",
+			RequestURLRegex: `^https://www\.tumblr\.com/`,
+		}},
 	}
 }
 
@@ -355,6 +373,7 @@ func (tl *TumblrLogin) cookieStep(instructions string) *bridgev2.LoginStep {
 	}
 	fields = append(fields, tumblrBrowserSessionCookieFields...)
 	fields = append(fields,
+		tumblrBrowserUserAgentField(),
 		bridgev2.LoginCookieField{
 			ID:       "api_token",
 			Required: false,
@@ -386,7 +405,6 @@ func (tl *TumblrLogin) cookieStep(instructions string) *bridgev2.LoginStep {
 		Instructions: instructions,
 		CookiesParams: &bridgev2.LoginCookiesParams{
 			URL:               "https://www.tumblr.com/messages",
-			UserAgent:         tl.tc.Config.BrowserUserAgent(),
 			WaitForURLPattern: `^https://www\.tumblr\.com/(?:messages|messaging|dashboard|blog/[^/?#]+/messages)(?:[/?#].*)?$`,
 			Fields:            fields,
 			ExtractJS:         tumblrExtractJSSession,
@@ -414,7 +432,7 @@ func (tl *TumblrLogin) SubmitUserInput(ctx context.Context, input map[string]str
 	}
 }
 
-func (tl *TumblrLogin) submitCredentials(ctx context.Context, input map[string]string) (*bridgev2.LoginStep, error) {
+func (tl *TumblrLogin) submitCredentials(_ context.Context, input map[string]string) (*bridgev2.LoginStep, error) {
 	identifier := strings.TrimSpace(input[loginFieldIdentifier])
 	password := input[loginFieldPassword]
 	if identifier == "" || password == "" {
@@ -427,15 +445,6 @@ func (tl *TumblrLogin) submitCredentials(ctx context.Context, input map[string]s
 		return tl.credentialsStep("Use the email address registered to your Tumblr account, not a blog name or username."), nil
 	}
 
-	client := tumblr.NewClient(tumblr.Options{
-		UserAgent:  tl.tc.Config.BrowserUserAgent(),
-		HTTPClient: tl.tc.newHTTPClient(),
-	})
-	if err := client.PrepareLogin(ctx); err != nil {
-		tl.logValidationError(err)
-		return nil, tumblrLoginValidationError(err)
-	}
-	tl.client = client
 	tl.identifier = identifier
 	tl.password = password
 	tl.twoFactor = ""
@@ -486,9 +495,15 @@ func (tl *TumblrLogin) submitPassword(ctx context.Context, blackboxSessionID str
 		case needsTwoFactor:
 			tl.twoFactor = ""
 			return tl.twoFactorStep("That authentication code was not accepted. Check the code and try again."), nil
+		case tumblr.IsLoginInputError(err) && tl.twoFactor != "":
+			tl.twoFactor = ""
+			return tl.twoFactorStep("That authentication code was not accepted. Check the code and try again."), nil
+		case tumblrLoginStatusCode(err) == http.StatusUnauthorized:
+			tl.clearPendingAuthentication()
+			return tl.credentialsStep("Tumblr did not accept that email and password. Check the registered account email and password and try again."), nil
 		case tumblr.IsLoginInputError(err):
 			tl.clearPendingAuthentication()
-			return tl.cookieStep(loginInstructions), nil
+			return tl.credentialsStep("Tumblr couldn't complete that sign-in. Make sure you're using the registered account email, not a blog name, and try again."), nil
 		default:
 			tl.clearPendingAuthentication()
 			tl.logValidationError(err)
@@ -522,9 +537,23 @@ func (tl *TumblrLogin) SubmitCookies(ctx context.Context, cookies map[string]str
 
 func (tl *TumblrLogin) submitBrowserVerification(ctx context.Context, input map[string]string) (*bridgev2.LoginStep, error) {
 	blackboxSessionID := strings.TrimSpace(input[loginFieldBlackbox])
-	if blackboxSessionID == "" {
+	browserUserAgent := normalizeOptionalHeaderCredential(input[loginFieldUserAgent])
+	if blackboxSessionID == "" || browserUserAgent == "" {
 		tl.clearPendingAuthentication()
-		return tl.cookieStep(loginInstructions), nil
+		return tl.credentialsStep("Tumblr's secure sign-in check did not finish. Enter your credentials and try again."), nil
+	}
+	if tl.client == nil {
+		client := tumblr.NewClient(tumblr.Options{
+			UserAgent:  browserUserAgent,
+			HTTPClient: tl.tc.newHTTPClient(),
+		})
+		if err := client.PrepareLogin(ctx); err != nil {
+			tl.clearPendingAuthentication()
+			tl.logValidationError(err)
+			return nil, tumblrLoginValidationError(err)
+		}
+		tl.client = client
+		tl.browserUserAgent = browserUserAgent
 	}
 	return tl.submitPassword(ctx, blackboxSessionID)
 }
@@ -539,14 +568,19 @@ func (tl *TumblrLogin) submitCookieInput(ctx context.Context, cookies map[string
 	if !tumblr.HasSessionCookies(sessionCookies) {
 		return nil, tumblrIncompleteLoginError()
 	}
+	browserUserAgent := normalizeOptionalHeaderCredential(cookies[loginFieldUserAgent])
+	if browserUserAgent == "" {
+		return tl.cookieStep("Tumblr's sign-in window did not return a browser identity. Please try again."), nil
+	}
 	client := tumblr.NewClient(tumblr.Options{
 		SessionCookies: sessionCookies,
 		APIToken:       apiToken,
 		CSRFToken:      csrfToken,
 		APIVersion:     apiVersion,
-		UserAgent:      tl.tc.Config.BrowserUserAgent(),
+		UserAgent:      browserUserAgent,
 		HTTPClient:     tl.tc.newHTTPClient(),
 	})
+	tl.browserUserAgent = browserUserAgent
 	return tl.finishAuthentication(ctx, client)
 }
 
@@ -630,6 +664,7 @@ func (tl *TumblrLogin) completeLogin(ctx context.Context, client *tumblr.Client,
 		APIToken:         snapshot.APIToken,
 		CSRFToken:        snapshot.CSRFToken,
 		APIVersion:       snapshot.APIVersion,
+		UserAgent:        tl.browserUserAgent,
 		UserName:         userName(userInfo, blog),
 		SelectedBlogName: blog.Name,
 		SelectedBlogUUID: blog.UUID,

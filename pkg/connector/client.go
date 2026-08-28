@@ -373,12 +373,16 @@ func (tc *TumblrConnector) LoadUserLogin(_ context.Context, login *bridgev2.User
 		bestEffortNormalizeUserLoginMetadata(meta)
 		login.Log.Warn().Err(err).Msg("Loaded incomplete Tumblr login metadata for recoverable reauthentication")
 	}
+	userAgent := normalizeOptionalHeaderCredential(meta.UserAgent)
+	if userAgent == "" {
+		userAgent = tc.Config.BrowserUserAgent()
+	}
 	client := tumblr.NewClient(tumblr.Options{
 		SessionCookies: meta.SessionCookies,
 		APIToken:       meta.APIToken,
 		CSRFToken:      meta.CSRFToken,
 		APIVersion:     meta.APIVersion,
-		UserAgent:      tc.Config.BrowserUserAgent(),
+		UserAgent:      userAgent,
 		HTTPClient:     tc.newHTTPClient(),
 	})
 	login.Client = NewTumblrClient(login, tc, client)
@@ -393,6 +397,7 @@ func bestEffortNormalizeUserLoginMetadata(meta *UserLoginMetadata) {
 	meta.APIToken = normalizeBearerToken(meta.APIToken)
 	meta.CSRFToken = normalizeOptionalHeaderCredential(meta.CSRFToken)
 	meta.APIVersion = normalizeOptionalHeaderCredential(meta.APIVersion)
+	meta.UserAgent = normalizeOptionalHeaderCredential(meta.UserAgent)
 	meta.UserName = normalizeOptionalMetadataBlogName(meta.UserName)
 	meta.SelectedBlogName = normalizeOptionalMetadataBlogName(meta.SelectedBlogName)
 	meta.SelectedBlogUUID = strings.TrimSpace(meta.SelectedBlogUUID)
