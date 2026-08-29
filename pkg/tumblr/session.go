@@ -24,6 +24,13 @@ var sessionCookieNameSet = map[string]struct{}{
 	"tmgioct":   {},
 }
 
+var sessionCookieDomains = map[string]string{
+	"logged_in": ".tumblr.com",
+	"pfu":       "www.tumblr.com",
+	"sid":       "www.tumblr.com",
+	"tmgioct":   ".tumblr.com",
+}
+
 // SessionSnapshot is the durable subset of a Tumblr browser session.
 type SessionSnapshot struct {
 	Cookies    map[string]string
@@ -158,6 +165,12 @@ func seedSessionCookies(jar http.CookieJar, urls []*url.URL, cookies map[string]
 		return
 	}
 	target := urls[0]
+	for _, candidate := range urls {
+		if strings.EqualFold(candidate.Hostname(), "www.tumblr.com") {
+			target = candidate
+			break
+		}
+	}
 	values := make([]*http.Cookie, 0, len(cookies))
 	for _, name := range sessionCookieNames {
 		value, ok := cookies[name]
@@ -168,7 +181,7 @@ func seedSessionCookies(jar http.CookieJar, urls []*url.URL, cookies map[string]
 			Name:     name,
 			Value:    value,
 			Path:     "/",
-			Domain:   ".tumblr.com",
+			Domain:   sessionCookieDomains[name],
 			Secure:   true,
 			HttpOnly: true,
 		})
