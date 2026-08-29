@@ -1,6 +1,6 @@
-# Tumblr DMs for Beeper
+# Tumblr for Beeper
 
-Tumblr DMs connects Tumblr direct messages to Beeper. This code powers the
+The Tumblr bridge connects Tumblr direct messages to Beeper. This code powers the
 Beeper Cloud and On-Device variants and can also run as a self-hosted bridge.
 
 This is an unofficial Tumblr integration. Tumblr changes may occasionally
@@ -87,5 +87,5 @@ registration, and Tumblr session. Do not share those files or bridge logs.
 
 ## License
 
-Tumblr DMs is licensed under GNU AGPLv3 or later, with the Beeper and Element
+The Tumblr bridge is licensed under GNU AGPLv3 or later, with the Beeper and Element
 exceptions in `LICENSE.exceptions`.

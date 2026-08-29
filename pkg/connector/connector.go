@@ -38,7 +38,7 @@ func (tc *TumblrConnector) Start(ctx context.Context) error {
 
 func (tc *TumblrConnector) GetName() bridgev2.BridgeName {
 	return bridgev2.BridgeName{
-		DisplayName:          "Tumblr DMs",
+		DisplayName:          "Tumblr",
 		NetworkURL:           "https://www.tumblr.com",
 		NetworkIcon:          id.ContentURIString(""),
 		NetworkID:            "tumblrdms",

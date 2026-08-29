@@ -26,7 +26,7 @@ func (tc *TumblrClient) HandleMatrixDeleteChat(ctx context.Context, msg *bridgev
 		return fmt.Errorf("delete-chat content is required")
 	}
 	if msg.Content.DeleteForEveryone {
-		return fmt.Errorf("tumblr dms do not support deleting chats for everyone")
+		return fmt.Errorf("tumblr does not support deleting chats for everyone")
 	}
 	conversationID, err := conversationIDFromPortal(msg.Portal, "portal is required to delete a Tumblr conversation")
 	if err != nil {

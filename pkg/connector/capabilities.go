@@ -73,7 +73,7 @@ func (tc *TumblrConnector) GetCapabilities() *bridgev2.NetworkGeneralCapabilitie
 }
 
 func (tc *TumblrConnector) GetBridgeInfoVersion() (info, capabilities int) {
-	return 1, 8
+	return 2, 8
 }
 
 func (tc *TumblrClient) GetCapabilities(context.Context, *bridgev2.Portal) *event.RoomFeatures {

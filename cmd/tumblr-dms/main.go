@@ -16,7 +16,7 @@ var (
 var bridgeMain = mxmain.BridgeMain{
 	Name:        "tumblr-dms",
 	URL:         "https://github.com/beeper/tumblr-dms",
-	Description: "A Matrix-Tumblr DMs puppeting bridge.",
+	Description: "A Matrix-Tumblr puppeting bridge.",
 	Version:     "0.1.1",
 	Connector:   &connector.TumblrConnector{},
 }

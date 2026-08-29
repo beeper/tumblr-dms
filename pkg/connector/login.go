@@ -821,7 +821,7 @@ func (tl *TumblrLogin) completeLogin(ctx context.Context, client *tumblr.Client,
 	return &bridgev2.LoginStep{
 		Type:         bridgev2.LoginStepTypeComplete,
 		StepID:       loginStepIDComplete,
-		Instructions: fmt.Sprintf("Tumblr DMs is connected as @%s.", strings.TrimPrefix(remoteName, "@")),
+		Instructions: fmt.Sprintf("Tumblr is connected as @%s.", strings.TrimPrefix(remoteName, "@")),
 		CompleteParams: &bridgev2.LoginCompleteParams{
 			UserLoginID: userLogin.ID,
 			UserLogin:   userLogin,
