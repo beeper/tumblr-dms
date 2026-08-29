@@ -80,7 +80,7 @@ jobs:
           files: artifacts/*
           generate_release_notes: false
           body: |
-            Pre-built binaries for the Tumblr DMs bridge.
+            Pre-built binaries for the Tumblr bridge.
 
             Download the one matching your OS/CPU, then:
 

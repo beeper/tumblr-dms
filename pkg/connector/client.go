@@ -69,7 +69,7 @@ var _ bridgev2.NetworkAPI = (*TumblrClient)(nil)
 
 var (
 	errTumblrEmptyText     = unsupportedMatrixMessageError(errors.New("message text is empty"))
-	errTumblrTextTooLong   = unsupportedMatrixMessageError(errors.New("message is too long for tumblr dms"))
+	errTumblrTextTooLong   = unsupportedMatrixMessageError(errors.New("message is too long for Tumblr"))
 	errTumblrClientRetired = errors.New("tumblr client was replaced")
 )
 
@@ -152,9 +152,9 @@ func tumblrBadCredentialsState(err error) status.BridgeState {
 }
 
 func tumblrBadCredentialsStateWithCode(errorCode status.BridgeStateErrorCode, _ error) status.BridgeState {
-	message := "Tumblr couldn't verify the saved sign-in. Please sign in again to reconnect Tumblr DMs."
+	message := "Tumblr couldn't verify the saved sign-in. Please sign in again to reconnect to Tumblr."
 	if errorCode == "tumblr-invalid-login-metadata" {
-		message = "Tumblr sign-in information is incomplete. Please sign in again to reconnect Tumblr DMs."
+		message = "Tumblr sign-in information is incomplete. Please sign in again to reconnect to Tumblr."
 	}
 	return status.BridgeState{
 		StateEvent: status.StateBadCredentials,
@@ -690,9 +690,9 @@ func (tc *TumblrClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.M
 		if canSendMatrixGIFAsTumblrImage(msg.Content) {
 			return tc.handleMatrixImageMessage(ctx, msg)
 		}
-		return nil, unsupportedMatrixMessageError(fmt.Errorf("tumblr dms currently only support text, image, GIF, and sticker messages"))
+		return nil, unsupportedMatrixMessageError(fmt.Errorf("tumblr currently only supports text, image, GIF, and sticker messages"))
 	default:
-		return nil, unsupportedMatrixMessageError(fmt.Errorf("tumblr dms currently only support text, image, GIF, and sticker messages"))
+		return nil, unsupportedMatrixMessageError(fmt.Errorf("tumblr currently only supports text, image, GIF, and sticker messages"))
 	}
 }
 

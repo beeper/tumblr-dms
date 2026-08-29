@@ -2,7 +2,7 @@
 set -eu
 
 if [ "${CGO_ENABLED:-1}" != "1" ]; then
-	echo "CGO_ENABLED=1 is required to build Tumblr DMs with SQLite support." >&2
+	echo "CGO_ENABLED=1 is required to build the Tumblr bridge with SQLite support." >&2
 	exit 1
 fi
 
