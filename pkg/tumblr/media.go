@@ -447,7 +447,7 @@ func (c *Client) DownloadImage(ctx context.Context, rawURL string, maxBytes int6
 		return DownloadedImage{}, newMediaDownloadError(failure, fmt.Sprintf("download failed with HTTP %d", resp.StatusCode))
 	}
 	if resp.ContentLength > maxBytes {
-		return DownloadedImage{}, newMediaDownloadError(MediaDownloadPermanent, "download is too large")
+		return DownloadedImage{}, newMediaDownloadError(MediaDownloadPermanent, fmt.Sprintf("download is larger than %d MiB", maxBytes>>20))
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
 	if err != nil {
@@ -457,7 +457,7 @@ func (c *Client) DownloadImage(ctx context.Context, rawURL string, maxBytes int6
 		return DownloadedImage{}, newMediaDownloadError(MediaDownloadTransient, "download read failed")
 	}
 	if int64(len(body)) > maxBytes {
-		return DownloadedImage{}, newMediaDownloadError(MediaDownloadPermanent, "download is too large")
+		return DownloadedImage{}, newMediaDownloadError(MediaDownloadPermanent, fmt.Sprintf("download is larger than %d MiB", maxBytes>>20))
 	}
 	mimeType, err := SniffImageMIME(body)
 	if err != nil {

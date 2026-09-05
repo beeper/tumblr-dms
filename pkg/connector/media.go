@@ -41,6 +41,15 @@ func messageCanUseImageMedia(message tumblr.Message) bool {
 	return msgconv.CanUseImageMedia(message)
 }
 
+func (tc *TumblrClient) maxDownloadBytes() int64 {
+	if tc.connector != nil {
+		if size := tc.connector.maxFileSize.Load(); size > 0 {
+			return size
+		}
+	}
+	return tumblr.DefaultMaxDownloadBytes
+}
+
 func (tc *TumblrClient) convertTumblrMessageWithMedia(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, message tumblr.Message) (*bridgev2.ConvertedMessage, error) {
 	postRefGIFMode := message.PostRefGIFMode()
 	if !messageCanUseImageMedia(message) {
@@ -153,19 +162,8 @@ func (tc *TumblrClient) fallbackTumblrPostRefGIF(message tumblr.Message, err err
 			Msg("Using a Tumblr GIF notice because the media was unavailable")
 	}
 	return &bridgev2.ConvertedMessage{Parts: []*bridgev2.ConvertedMessagePart{
-		tumblrPostRefGIFFailureNotice(message),
+		tumblrPostRefFailureNotice(message, "GIF", err),
 	}}
-}
-
-func tumblrPostRefGIFFailureNotice(message tumblr.Message) *bridgev2.ConvertedMessagePart {
-	return &bridgev2.ConvertedMessagePart{
-		Type: event.EventMessage,
-		Content: &event.MessageEventContent{
-			MsgType: event.MsgNotice,
-			Body:    "Could not load Tumblr GIF",
-		},
-		DBMetadata: &MessageMetadata{Type: msgconv.MessageMetadataType(message.Type)},
-	}
 }
 
 func (tc *TumblrClient) fallbackTumblrPostRefMedia(message tumblr.Message, err error) *bridgev2.ConvertedMessage {
@@ -176,14 +174,30 @@ func (tc *TumblrClient) fallbackTumblrPostRefMedia(message tumblr.Message, err e
 			Str("message_type", logMessageType(message.Type)).
 			Msg("Using a Tumblr media notice because an ambiguous post could not be inspected")
 	}
-	return &bridgev2.ConvertedMessage{Parts: []*bridgev2.ConvertedMessagePart{{
+	return &bridgev2.ConvertedMessage{Parts: []*bridgev2.ConvertedMessagePart{
+		tumblrPostRefFailureNotice(message, "media", err),
+	}}
+}
+
+func tumblrPostRefFailureNotice(message tumblr.Message, kind string, err error) *bridgev2.ConvertedMessagePart {
+	body := "Could not load Tumblr " + kind
+	var downloadErr *tumblr.MediaDownloadError
+	if errors.As(err, &downloadErr) {
+		body += ": " + downloadErr.Error()
+	}
+	if message.Post != nil {
+		if postURL := message.Post.BestURL(); postURL != "" {
+			body += "\n" + postURL
+		}
+	}
+	return &bridgev2.ConvertedMessagePart{
 		Type: event.EventMessage,
 		Content: &event.MessageEventContent{
 			MsgType: event.MsgNotice,
-			Body:    "Could not load Tumblr media",
+			Body:    body,
 		},
 		DBMetadata: &MessageMetadata{Type: msgconv.MessageMetadataType(message.Type)},
-	}}}
+	}
 }
 
 func (tc *TumblrClient) convertTumblrImage(
@@ -207,7 +221,7 @@ func (tc *TumblrClient) convertTumblrImage(
 	var firstPermanentErr error
 	mismatchedCandidates := 0
 	for candidateIndex, image := range candidates {
-		downloaded, err := client.DownloadImage(ctx, image.URL, tumblr.DefaultMaxDownloadBytes)
+		downloaded, err := client.DownloadImage(ctx, image.URL, tc.maxDownloadBytes())
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, false, ctx.Err()

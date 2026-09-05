@@ -29,8 +29,8 @@ const (
 	MaxMessageTextRunes     = 4096
 	MaxRequestLimit         = 100
 	defaultUserAgent        = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36"
-	DefaultMaxDownloadBytes = 5 * 1024 * 1024
-	DefaultMaxUploadBytes   = DefaultMaxDownloadBytes
+	DefaultMaxUploadBytes   = 5 * 1024 * 1024
+	DefaultMaxDownloadBytes = 50 * 1024 * 1024
 	maxBootstrapPageBytes   = 4 * 1024 * 1024
 	maxAPIResponseBytes     = 8 * 1024 * 1024
 	maxIdentifierRunes      = 512
