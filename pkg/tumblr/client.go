@@ -1525,7 +1525,7 @@ func (c *Client) doOnceWithRedirectPolicy(ctx context.Context, method, path stri
 		// ambiguous stream failure.
 		req.GetBody = nil
 	}
-	c.setAPIHeaders(req, body != nil)
+	c.setAPIHeaders(req, path, body != nil)
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
@@ -1669,13 +1669,17 @@ func (c *Client) setBrowserHeaders(req *http.Request) {
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 }
 
-func (c *Client) setAPIHeaders(req *http.Request, hasBody bool) {
+func (c *Client) setAPIHeaders(req *http.Request, apiPath string, hasBody bool) {
 	c.mu.RLock()
 	apiToken := c.apiToken
 	csrfToken := c.csrfToken
 	apiVersion := c.apiVersion
 	c.mu.RUnlock()
-	req.Header.Set("User-Agent", c.userAgent)
+	userAgent := c.userAgent
+	if apiPath != "/v2/oauth2/token" {
+		userAgent += " Beeper-Tumblr/1.0"
+	}
+	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Authorization", "Bearer "+apiToken)
 	req.Header.Set("Accept", "application/json;format=camelcase")
 	if apiVersion != "" {
