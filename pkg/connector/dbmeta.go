@@ -41,7 +41,7 @@ type PortalMetadata struct {
 type MessageMetadata = msgconv.MessageMetadata
 
 type UserLoginMetadata struct {
-	SessionCookies   map[string]string `json:"session_cookies,omitempty"`
+	SessionCookies   *tumblr.CookieJar `json:"session_cookies,omitempty"`
 	APIToken         string            `json:"api_token,omitempty"`
 	CSRFToken        string            `json:"csrf_token,omitempty"`
 	APIVersion       string            `json:"api_version,omitempty"`
@@ -76,10 +76,6 @@ func (m *UserLoginMetadata) clone() *UserLoginMetadata {
 		return nil
 	}
 	cloned := *m
-	cloned.SessionCookies = make(map[string]string, len(m.SessionCookies))
-	for name, value := range m.SessionCookies {
-		cloned.SessionCookies[name] = value
-	}
 	cloned.PushKeys = m.PushKeys.clone()
 	return &cloned
 }
@@ -210,7 +206,7 @@ func (m *UserLoginMetadata) MarshalZerologObject(e *zerolog.Event) {
 		e.Str("value", "<nil>")
 		return
 	}
-	e.Int("session_cookie_count", len(tumblr.NormalizeSessionCookies(m.SessionCookies))).
+	e.Int("session_cookie_count", len(m.SessionCookies.Values())).
 		Str("api_token", redactedMetadataValue(m.APIToken)).
 		Str("csrf_token", redactedMetadataValue(m.CSRFToken)).
 		Str("api_version", redactedMetadataValue(m.APIVersion)).
@@ -244,8 +240,8 @@ func redactedPushKeysValue(keys *PushKeys) string {
 	return "<redacted>"
 }
 
-func redactedSessionCookiesValue(cookies map[string]string) string {
-	if len(tumblr.NormalizeSessionCookies(cookies)) == 0 {
+func redactedSessionCookiesValue(cookies *tumblr.CookieJar) string {
+	if len(cookies.Values()) == 0 {
 		return "<empty>"
 	}
 	return "<redacted>"
@@ -274,7 +270,7 @@ func normalizedUserLoginMetadata(raw any) (*UserLoginMetadata, error) {
 		return nil, fmt.Errorf("tumblr login metadata is missing")
 	}
 	normalized := *meta
-	sessionCookies := tumblr.NormalizeSessionCookies(meta.SessionCookies)
+	sessionCookies := meta.SessionCookies.Values()
 	apiToken := normalizeBearerToken(meta.APIToken)
 	if !tumblr.HasSessionCookies(sessionCookies) {
 		return nil, fmt.Errorf("tumblr session cookies are missing")
@@ -294,7 +290,6 @@ func normalizedUserLoginMetadata(raw any) (*UserLoginMetadata, error) {
 	if !validRemoteID(selectedBlogUUID) {
 		return nil, fmt.Errorf("selected tumblr blog uuid is invalid")
 	}
-	normalized.SessionCookies = tumblr.NormalizeSessionCookies(sessionCookies)
 	normalized.APIToken = apiToken
 	normalized.CSRFToken = normalizeOptionalHeaderCredential(meta.CSRFToken)
 	normalized.APIVersion = normalizeOptionalHeaderCredential(meta.APIVersion)

@@ -118,17 +118,6 @@ func (tc *TumblrClient) ConnectBackground(ctx context.Context, params *bridgev2.
 		return bridgev2.ErrNotLoggedIn
 	}
 	defer tc.endOwnedOperation()
-	client, err := tc.tumblrClient()
-	if err != nil {
-		return err
-	}
-	defer func() {
-		persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), tumblrPushRequestTimeout)
-		defer cancel()
-		if persistErr := tc.persistOwnedSessionSnapshot(persistCtx, client.SessionSnapshot()); persistErr != nil {
-			err = errors.Join(err, fmt.Errorf("failed to save refreshed Tumblr session after background sync: %w", persistErr))
-		}
-	}()
 	if params == nil || len(params.RawData) == 0 {
 		return fmt.Errorf("tumblr push payload is empty")
 	}
