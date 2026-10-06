@@ -623,12 +623,12 @@ func (tl *TumblrLogin) submitCookieInput(ctx context.Context, cookies map[string
 		return tl.cookieStep("Tumblr's sign-in window did not return a browser identity. Please try again."), nil
 	}
 	client := tumblr.NewClient(tumblr.Options{
-		SessionCookies: sessionCookies,
-		APIToken:       apiToken,
-		CSRFToken:      csrfToken,
-		APIVersion:     apiVersion,
-		UserAgent:      browserUserAgent,
-		HTTPClient:     tl.newLoginHTTPClient(),
+		Cookies:    tumblr.NewCookieJar(sessionCookies),
+		APIToken:   apiToken,
+		CSRFToken:  csrfToken,
+		APIVersion: apiVersion,
+		UserAgent:  browserUserAgent,
+		HTTPClient: tl.newLoginHTTPClient(),
 	})
 	tl.browserUserAgent = browserUserAgent
 	return tl.finishAuthentication(ctx, client)
@@ -711,15 +711,15 @@ func (tl *TumblrLogin) completeLogin(ctx context.Context, client *tumblr.Client,
 		return nil, fmt.Errorf("tumblr blog selection is missing")
 	}
 	replacementLogin := tl.override
-	snapshot := client.SessionSnapshot()
-	if !tumblr.HasSessionCookies(snapshot.Cookies) {
+	cookies := client.Cookies()
+	if !tumblr.HasSessionCookies(cookies.Values()) {
 		return nil, tumblrIncompleteLoginError()
 	}
 	meta := &UserLoginMetadata{
-		SessionCookies:   snapshot.Cookies,
-		APIToken:         snapshot.APIToken,
-		CSRFToken:        snapshot.CSRFToken,
-		APIVersion:       snapshot.APIVersion,
+		SessionCookies:   cookies,
+		APIToken:         client.APIToken(),
+		CSRFToken:        client.CSRFToken(),
+		APIVersion:       client.APIVersion(),
 		UserAgent:        tl.browserUserAgent,
 		UserName:         userName(userInfo, blog),
 		SelectedBlogName: blog.Name,

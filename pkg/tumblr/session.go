@@ -1,11 +1,14 @@
 package tumblr
 
 import (
+	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 
 	"golang.org/x/net/publicsuffix"
 )
@@ -31,27 +34,73 @@ var sessionCookieDomains = map[string]string{
 	"tmgioct":   ".tumblr.com",
 }
 
-// SessionSnapshot is the durable subset of a Tumblr browser session.
-type SessionSnapshot struct {
-	Cookies    map[string]string
-	APIToken   string
-	CSRFToken  string
-	APIVersion string
+// CookieJar holds the live Tumblr session cookies. The HTTP client and the
+// saved login share it, so saving the login always writes the current cookies.
+type CookieJar struct {
+	lock     sync.Mutex
+	jar      http.CookieJar
+	urls     []*url.URL
+	onChange func()
 }
 
-func (s SessionSnapshot) Equal(other SessionSnapshot) bool {
-	if s.APIToken != other.APIToken || s.CSRFToken != other.CSRFToken || s.APIVersion != other.APIVersion {
-		return false
+var (
+	_ http.CookieJar   = (*CookieJar)(nil)
+	_ json.Marshaler   = (*CookieJar)(nil)
+	_ json.Unmarshaler = (*CookieJar)(nil)
+)
+
+func NewCookieJar(cookies map[string]string) *CookieJar {
+	jar, urls := newSessionCookieJar(DefaultWebBaseURL, DefaultAPIBaseURL, cookies)
+	return &CookieJar{jar: jar, urls: urls}
+}
+
+func (j *CookieJar) Cookies(u *url.URL) []*http.Cookie {
+	return j.jar.Cookies(u)
+}
+
+func (j *CookieJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
+	j.lock.Lock()
+	before := sessionCookiesFromJar(j.jar, j.urls)
+	j.jar.SetCookies(u, cookies)
+	changed := !maps.Equal(before, sessionCookiesFromJar(j.jar, j.urls))
+	onChange := j.onChange
+	j.lock.Unlock()
+	if changed && onChange != nil {
+		onChange()
 	}
-	if len(s.Cookies) != len(other.Cookies) {
-		return false
+}
+
+// OnChange sets a function to call after Tumblr changes a session cookie.
+func (j *CookieJar) OnChange(fn func()) {
+	j.lock.Lock()
+	j.onChange = fn
+	j.lock.Unlock()
+}
+
+func (j *CookieJar) Values() map[string]string {
+	if j == nil {
+		return map[string]string{}
 	}
-	for name, value := range s.Cookies {
-		if other.Cookies[name] != value {
-			return false
-		}
+	j.lock.Lock()
+	defer j.lock.Unlock()
+	return sessionCookiesFromJar(j.jar, j.urls)
+}
+
+func (j *CookieJar) MarshalJSON() ([]byte, error) {
+	return json.Marshal(j.Values())
+}
+
+func (j *CookieJar) UnmarshalJSON(data []byte) error {
+	var cookies map[string]string
+	if err := json.Unmarshal(data, &cookies); err != nil {
+		return err
 	}
-	return true
+	jar, urls := newSessionCookieJar(DefaultWebBaseURL, DefaultAPIBaseURL, cookies)
+	j.lock.Lock()
+	j.jar = jar
+	j.urls = urls
+	j.lock.Unlock()
+	return nil
 }
 
 func HasSessionCookies(cookies map[string]string) bool {

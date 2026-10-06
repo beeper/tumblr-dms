@@ -59,15 +59,14 @@ var authRefreshRetryDelays = []time.Duration{
 }
 
 type Options struct {
-	WebBaseURL     string
-	APIBaseURL     string
-	UserAgent      string
-	CookieHeader   string
-	SessionCookies map[string]string
-	APIToken       string
-	CSRFToken      string
-	APIVersion     string
-	HTTPClient     *http.Client
+	WebBaseURL string
+	APIBaseURL string
+	UserAgent  string
+	Cookies    *CookieJar
+	APIToken   string
+	CSRFToken  string
+	APIVersion string
+	HTTPClient *http.Client
 }
 
 type Client struct {
@@ -82,8 +81,7 @@ type Client struct {
 	apiVersion       string
 	recaptchaSiteKey string
 	httpClient       *http.Client
-	sessionURLs      []*url.URL
-	sessionUpdates   chan struct{}
+	cookies          *CookieJar
 }
 
 type ImageUpload struct {
@@ -101,22 +99,20 @@ func NewClient(opts Options) *Client {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
 	httpClientClone := *httpClient
-	sessionCookies := NormalizeSessionCookies(opts.SessionCookies)
-	if len(sessionCookies) == 0 {
-		sessionCookies = SessionCookiesFromHeader(opts.CookieHeader)
+	cookies := opts.Cookies
+	if cookies == nil {
+		cookies = NewCookieJar(nil)
 	}
-	jar, sessionURLs := newSessionCookieJar(webBaseURL, apiBaseURL, sessionCookies)
-	httpClientClone.Jar = jar
+	httpClientClone.Jar = cookies
 	return &Client{
-		webBaseURL:     webBaseURL,
-		apiBaseURL:     apiBaseURL,
-		userAgent:      userAgent,
-		apiToken:       normalizeBearerToken(opts.APIToken),
-		csrfToken:      normalizeOptionalHeaderCredential(opts.CSRFToken),
-		apiVersion:     normalizeOptionalHeaderCredential(opts.APIVersion),
-		httpClient:     &httpClientClone,
-		sessionURLs:    sessionURLs,
-		sessionUpdates: make(chan struct{}, 1),
+		webBaseURL: webBaseURL,
+		apiBaseURL: apiBaseURL,
+		userAgent:  userAgent,
+		apiToken:   normalizeBearerToken(opts.APIToken),
+		csrfToken:  normalizeOptionalHeaderCredential(opts.CSRFToken),
+		apiVersion: normalizeOptionalHeaderCredential(opts.APIVersion),
+		httpClient: &httpClientClone,
+		cookies:    cookies,
 	}
 }
 
@@ -426,7 +422,7 @@ func containsSpaceOrControl(value string) bool {
 }
 
 func (c *Client) CookieHeader() string {
-	return SessionCookieHeader(c.SessionSnapshot().Cookies)
+	return SessionCookieHeader(c.cookies.Values())
 }
 
 func (c *Client) APIToken() string {
@@ -453,41 +449,8 @@ func (c *Client) RecaptchaSiteKey() string {
 	return c.recaptchaSiteKey
 }
 
-func (c *Client) SessionSnapshot() SessionSnapshot {
-	if c == nil {
-		return SessionSnapshot{}
-	}
-	c.mu.RLock()
-	snapshot := SessionSnapshot{
-		APIToken:   c.apiToken,
-		CSRFToken:  c.csrfToken,
-		APIVersion: c.apiVersion,
-	}
-	c.mu.RUnlock()
-	if c.httpClient != nil {
-		snapshot.Cookies = sessionCookiesFromJar(c.httpClient.Jar, c.sessionURLs)
-	}
-	if snapshot.Cookies == nil {
-		snapshot.Cookies = make(map[string]string)
-	}
-	return snapshot
-}
-
-func (c *Client) SessionUpdates() <-chan struct{} {
-	if c == nil {
-		return nil
-	}
-	return c.sessionUpdates
-}
-
-func (c *Client) signalSessionUpdateIfChanged(previous SessionSnapshot) {
-	if c == nil || previous.Equal(c.SessionSnapshot()) {
-		return
-	}
-	select {
-	case c.sessionUpdates <- struct{}{}:
-	default:
-	}
+func (c *Client) Cookies() *CookieJar {
+	return c.cookies
 }
 
 func (c *Client) needsBootstrap(mutating bool) bool {
@@ -551,8 +514,6 @@ func (c *Client) currentAuthGeneration() uint64 {
 }
 
 func (c *Client) bootstrap(ctx context.Context) error {
-	previousSession := c.SessionSnapshot()
-	defer c.signalSessionUpdateIfChanged(previousSession)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.webBaseURL+"/messaging", nil)
 	if err != nil {
 		return err
@@ -1481,8 +1442,6 @@ func (c *Client) doOnce(ctx context.Context, method, path string, query url.Valu
 }
 
 func (c *Client) doOnceWithRedirectPolicy(ctx context.Context, method, path string, query url.Values, body any, out any, allowRedirects bool) error {
-	previousSession := c.SessionSnapshot()
-	defer c.signalSessionUpdateIfChanged(previousSession)
 	c.mu.RLock()
 	apiBaseURL := c.apiBaseURL
 	c.mu.RUnlock()

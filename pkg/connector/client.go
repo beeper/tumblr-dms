@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"net/url"
 	"strings"
 	"sync"
@@ -73,7 +72,7 @@ var (
 	errTumblrClientRetired = errors.New("tumblr client was replaced")
 )
 
-const tumblrSessionFinalFlushTimeout = 10 * time.Second
+const tumblrSessionSaveTimeout = 10 * time.Second
 
 func unsupportedMatrixMessageError(err error) error {
 	return bridgev2.WrapErrorInStatus(err).
@@ -227,116 +226,14 @@ func (tc *TumblrClient) loginMetadataSnapshot() (*UserLoginMetadata, error) {
 	return meta.clone(), nil
 }
 
-func (tc *TumblrClient) startSessionUpdateLoop(generation *connectionGeneration, client *tumblr.Client) {
-	if tc == nil || generation == nil || client == nil || !tc.isCurrentGeneration(generation) {
-		return
-	}
-	generation.wg.Add(1)
-	go tc.sessionUpdateLoop(generation, client)
-}
-
-func (tc *TumblrClient) sessionUpdateLoop(generation *connectionGeneration, client *tumblr.Client) {
-	defer generation.wg.Done()
-	ctx := generation.ctx
-	defer tc.flushFinalSessionSnapshot(ctx, client)
-	pending := false
-	for {
-		if !pending {
-			select {
-			case <-ctx.Done():
-				return
-			case <-client.SessionUpdates():
-				pending = true
-			}
-		}
-		if err := tc.persistSessionSnapshot(ctx, client.SessionSnapshot()); err == nil {
-			pending = false
-			continue
-		} else if log := tc.log(); log != nil {
-			log.Warn().Err(err).Msg("Failed to save refreshed Tumblr session; retrying")
-		}
-		retryTimer := time.NewTimer(5 * time.Second)
-		select {
-		case <-ctx.Done():
-			retryTimer.Stop()
-			return
-		case <-retryTimer.C:
-		}
-	}
-}
-
-func (tc *TumblrClient) flushFinalSessionSnapshot(generationCtx context.Context, client *tumblr.Client) {
-	if tc == nil || client == nil {
-		return
-	}
-	flushCtx, cancel := context.WithTimeout(
-		context.WithoutCancel(generationCtx),
-		tumblrSessionFinalFlushTimeout,
-	)
+func (tc *TumblrClient) saveRefreshedSession() {
+	ctx, cancel := context.WithTimeout(context.Background(), tumblrSessionSaveTimeout)
 	defer cancel()
-	if err := tc.persistSessionSnapshot(flushCtx, client.SessionSnapshot()); err != nil &&
-		!errors.Is(err, errTumblrClientRetired) {
+	if err := tc.saveUserLogin(ctx); err != nil && !errors.Is(err, errTumblrClientRetired) {
 		if log := tc.log(); log != nil {
-			log.Warn().Err(err).Msg("Failed to save final Tumblr session snapshot")
+			log.Warn().Err(err).Msg("Failed to save refreshed Tumblr session")
 		}
 	}
-}
-
-func (tc *TumblrClient) persistSessionSnapshot(ctx context.Context, snapshot tumblr.SessionSnapshot) error {
-	if tc == nil {
-		return errTumblrClientRetired
-	}
-	if !tc.beginOwnedOperation() {
-		return errTumblrClientRetired
-	}
-	defer tc.endOwnedOperation()
-	return tc.persistOwnedSessionSnapshot(ctx, snapshot)
-}
-
-func (tc *TumblrClient) persistOwnedSessionSnapshot(ctx context.Context, snapshot tumblr.SessionSnapshot) error {
-	if !tumblr.HasSessionCookies(snapshot.Cookies) {
-		return fmt.Errorf("refreshed Tumblr session did not include session cookies")
-	}
-	tc.loginMetadataLock.Lock()
-	meta, err := tc.validatedLoginMetadataLocked()
-	if err != nil {
-		tc.loginMetadataLock.Unlock()
-		return err
-	}
-	cookies := tumblr.NormalizeSessionCookies(snapshot.Cookies)
-	if sessionSnapshotMatchesMetadata(snapshot, cookies, meta) {
-		tc.loginMetadataLock.Unlock()
-		return nil
-	}
-	previousCookies := meta.SessionCookies
-	previousAPIToken := meta.APIToken
-	previousCSRFToken := meta.CSRFToken
-	previousAPIVersion := meta.APIVersion
-	meta.SessionCookies = cookies
-	meta.APIToken = snapshot.APIToken
-	meta.CSRFToken = snapshot.CSRFToken
-	meta.APIVersion = snapshot.APIVersion
-	tc.loginMetadataLock.Unlock()
-	if err = tc.saveOwnedUserLogin(ctx); err != nil {
-		tc.loginMetadataLock.Lock()
-		if sessionSnapshotMatchesMetadata(snapshot, cookies, meta) {
-			meta.SessionCookies = previousCookies
-			meta.APIToken = previousAPIToken
-			meta.CSRFToken = previousCSRFToken
-			meta.APIVersion = previousAPIVersion
-		}
-		tc.loginMetadataLock.Unlock()
-		return err
-	}
-	return nil
-}
-
-func sessionSnapshotMatchesMetadata(snapshot tumblr.SessionSnapshot, cookies map[string]string, meta *UserLoginMetadata) bool {
-	if meta == nil || meta.APIToken != snapshot.APIToken ||
-		meta.CSRFToken != snapshot.CSRFToken || meta.APIVersion != snapshot.APIVersion {
-		return false
-	}
-	return maps.Equal(meta.SessionCookies, cookies)
 }
 
 func (tc *TumblrClient) queueRemoteEvent(evt bridgev2.RemoteEvent) bridgev2.EventHandlingResult {
@@ -377,15 +274,20 @@ func (tc *TumblrConnector) LoadUserLogin(_ context.Context, login *bridgev2.User
 	if userAgent == "" {
 		userAgent = tc.Config.BrowserUserAgent()
 	}
+	if meta.SessionCookies == nil {
+		meta.SessionCookies = tumblr.NewCookieJar(nil)
+	}
 	client := tumblr.NewClient(tumblr.Options{
-		SessionCookies: meta.SessionCookies,
-		APIToken:       meta.APIToken,
-		CSRFToken:      meta.CSRFToken,
-		APIVersion:     meta.APIVersion,
-		UserAgent:      userAgent,
-		HTTPClient:     tc.newHTTPClient(),
+		Cookies:    meta.SessionCookies,
+		APIToken:   meta.APIToken,
+		CSRFToken:  meta.CSRFToken,
+		APIVersion: meta.APIVersion,
+		UserAgent:  userAgent,
+		HTTPClient: tc.newHTTPClient(),
 	})
-	login.Client = NewTumblrClient(login, tc, client)
+	tumblrClient := NewTumblrClient(login, tc, client)
+	meta.SessionCookies.OnChange(tumblrClient.saveRefreshedSession)
+	login.Client = tumblrClient
 	return nil
 }
 
@@ -393,7 +295,6 @@ func bestEffortNormalizeUserLoginMetadata(meta *UserLoginMetadata) {
 	if meta == nil {
 		return
 	}
-	meta.SessionCookies = tumblr.NormalizeSessionCookies(meta.SessionCookies)
 	meta.APIToken = normalizeBearerToken(meta.APIToken)
 	meta.CSRFToken = normalizeOptionalHeaderCredential(meta.CSRFToken)
 	meta.APIVersion = normalizeOptionalHeaderCredential(meta.APIVersion)
@@ -491,11 +392,6 @@ func (tc *TumblrClient) runConnectionGeneration(generation *connectionGeneration
 		return
 	}
 	tc.setLoggedIn(true)
-	if err = tc.persistOwnedSessionSnapshot(ctx, client.SessionSnapshot()); err != nil {
-		if log := tc.log(); log != nil {
-			log.Warn().Err(err).Msg("Failed to save refreshed Tumblr session")
-		}
-	}
 	tc.loginMetadataLock.Lock()
 	liveMeta, metadataErr := tc.validatedLoginMetadataLocked()
 	if metadataErr == nil {
@@ -521,7 +417,6 @@ func (tc *TumblrClient) runConnectionGeneration(generation *connectionGeneration
 		}
 	}
 	tc.ensureInboundSyncStarted(generation)
-	tc.startSessionUpdateLoop(generation, client)
 	tc.startPushSupervisor(generation)
 	tc.startOutboundSync(generation)
 }
