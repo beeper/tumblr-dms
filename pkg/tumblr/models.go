@@ -843,6 +843,22 @@ type PostRefContent struct {
 	Media []PostRefMedia `json:"media"`
 }
 
+func (c *PostRefContent) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Type  string          `json:"type"`
+		Text  string          `json:"text"`
+		Media json.RawMessage `json:"media"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*c = PostRefContent{Type: raw.Type, Text: raw.Text}
+	if strings.EqualFold(strings.TrimSpace(raw.Type), "image") && len(raw.Media) > 0 {
+		return json.Unmarshal(raw.Media, &c.Media)
+	}
+	return nil
+}
+
 type PostRefMedia struct {
 	URL     string      `json:"url"`
 	Type    string      `json:"type"`
