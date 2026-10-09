@@ -37,6 +37,8 @@ var (
 	_ bridgev2.BackgroundSyncingNetworkAPI = (*TumblrClient)(nil)
 )
 
+var errPushWithoutConversation = errors.New("tumblr push payload did not include a valid conversation ID")
+
 var tumblrPushConfig = &bridgev2.PushConfig{
 	Web: &bridgev2.WebPushConfig{VapidKey: tumblrWebPushVAPIDKey},
 }
@@ -949,7 +951,12 @@ func pushRegistrationByToken(keys *PushKeys, token string) *PushRegistration {
 
 func (tc *TumblrClient) handleWebPushPayload(ctx context.Context, data json.RawMessage) error {
 	conversationPush, err := tc.conversationFromPushPayload(data)
-	if err != nil {
+	if errors.Is(err, errPushWithoutConversation) {
+		if log := tc.log(); log != nil {
+			log.Debug().Msg("Ignoring Tumblr push without a conversation")
+		}
+		return nil
+	} else if err != nil {
 		return err
 	}
 	if conversationPush.FromBlogName != "" || conversationPush.ToBlogName != "" {
@@ -987,7 +994,7 @@ func (tc *TumblrClient) conversationFromPushPayload(data json.RawMessage) (tumbl
 		conversationPush.ConversationID = findConversationID(value)
 	}
 	if !validRemoteID(conversationPush.ConversationID) {
-		return tumblrConversationPush{}, fmt.Errorf("tumblr push payload did not include a valid conversation ID")
+		return tumblrConversationPush{}, errPushWithoutConversation
 	}
 	return conversationPush, nil
 }
