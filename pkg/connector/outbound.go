@@ -20,10 +20,10 @@ import (
 	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
 
-	"github.com/ifixrobots/tumblr-dms/pkg/connector/tumblrdb"
-	"github.com/ifixrobots/tumblr-dms/pkg/msgconv"
-	"github.com/ifixrobots/tumblr-dms/pkg/tumblr"
-	"github.com/ifixrobots/tumblr-dms/pkg/tumblrid"
+	"github.com/beeper/tumblr-dms/pkg/connector/tumblrdb"
+	"github.com/beeper/tumblr-dms/pkg/msgconv"
+	"github.com/beeper/tumblr-dms/pkg/tumblr"
+	"github.com/beeper/tumblr-dms/pkg/tumblrid"
 )
 
 const (

@@ -15,8 +15,8 @@ import (
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/bridgev2/status"
 
-	"github.com/ifixrobots/tumblr-dms/pkg/tumblr"
-	"github.com/ifixrobots/tumblr-dms/pkg/tumblrid"
+	"github.com/beeper/tumblr-dms/pkg/tumblr"
+	"github.com/beeper/tumblr-dms/pkg/tumblrid"
 )
 
 const (

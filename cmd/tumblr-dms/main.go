@@ -3,7 +3,7 @@ package main
 import (
 	"maunium.net/go/mautrix/bridgev2/matrix/mxmain"
 
-	"github.com/ifixrobots/tumblr-dms/pkg/connector"
+	"github.com/beeper/tumblr-dms/pkg/connector"
 )
 
 // These are filled at build time with -X linker flags.

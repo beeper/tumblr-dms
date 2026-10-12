@@ -16,8 +16,8 @@ import (
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/status"
 
-	pushreceiver "github.com/ifixrobots/tumblr-dms/internal/pushreceiver"
-	"github.com/ifixrobots/tumblr-dms/pkg/tumblr"
+	pushreceiver "github.com/beeper/tumblr-dms/internal/pushreceiver"
+	"github.com/beeper/tumblr-dms/pkg/tumblr"
 )
 
 const tumblrWebPushVAPIDKey = "BBDh-66UWJ5mfoWvDjX5hRaKUYcwykutJHf4-f4oonC44K7wkRPtHi-BsLW7wPPMNLnju7fWMjpfwiOsZlU1LE0"

@@ -10,7 +10,7 @@ import (
 	up "go.mau.fi/util/configupgrade"
 	"gopkg.in/yaml.v3"
 
-	"github.com/ifixrobots/tumblr-dms/pkg/tumblr"
+	"github.com/beeper/tumblr-dms/pkg/tumblr"
 )
 
 const (

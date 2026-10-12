@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"strings"
 
-	"github.com/ifixrobots/tumblr-dms/pkg/tumblr"
+	"github.com/beeper/tumblr-dms/pkg/tumblr"
 )
 
 func logIdentifierHash(value string) string {

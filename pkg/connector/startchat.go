@@ -11,8 +11,8 @@ import (
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 
-	"github.com/ifixrobots/tumblr-dms/pkg/tumblr"
-	"github.com/ifixrobots/tumblr-dms/pkg/tumblrid"
+	"github.com/beeper/tumblr-dms/pkg/tumblr"
+	"github.com/beeper/tumblr-dms/pkg/tumblrid"
 )
 
 var _ bridgev2.IdentifierResolvingNetworkAPI = (*TumblrClient)(nil)

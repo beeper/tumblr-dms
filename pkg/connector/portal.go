@@ -6,7 +6,7 @@ import (
 
 	"maunium.net/go/mautrix/bridgev2"
 
-	"github.com/ifixrobots/tumblr-dms/pkg/tumblrid"
+	"github.com/beeper/tumblr-dms/pkg/tumblrid"
 )
 
 func conversationIDFromPortal(portal *bridgev2.Portal, requiredError string) (string, error) {

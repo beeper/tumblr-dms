@@ -13,8 +13,8 @@ import (
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2/database"
 
-	"github.com/ifixrobots/tumblr-dms/pkg/msgconv"
-	"github.com/ifixrobots/tumblr-dms/pkg/tumblr"
+	"github.com/beeper/tumblr-dms/pkg/msgconv"
+	"github.com/beeper/tumblr-dms/pkg/tumblr"
 )
 
 func (tc *TumblrConnector) GetDBMetaTypes() database.MetaTypes {

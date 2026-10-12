@@ -19,9 +19,9 @@ import (
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
-	"github.com/ifixrobots/tumblr-dms/pkg/connector/tumblrdb"
-	"github.com/ifixrobots/tumblr-dms/pkg/tumblr"
-	"github.com/ifixrobots/tumblr-dms/pkg/tumblrid"
+	"github.com/beeper/tumblr-dms/pkg/connector/tumblrdb"
+	"github.com/beeper/tumblr-dms/pkg/tumblr"
+	"github.com/beeper/tumblr-dms/pkg/tumblrid"
 )
 
 type TumblrClient struct {

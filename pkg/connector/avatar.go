@@ -9,7 +9,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 
-	"github.com/ifixrobots/tumblr-dms/pkg/tumblr"
+	"github.com/beeper/tumblr-dms/pkg/tumblr"
 )
 
 func (tc *TumblrClient) blogAvatar(blog tumblr.Blog) *bridgev2.Avatar {

@@ -7,7 +7,7 @@ import (
 
 	"maunium.net/go/mautrix/bridgev2"
 
-	"github.com/ifixrobots/tumblr-dms/pkg/tumblr"
+	"github.com/beeper/tumblr-dms/pkg/tumblr"
 )
 
 const tumblrMatrixDeleteContinuationGrace = 2 * time.Minute

@@ -1,4 +1,4 @@
-module github.com/ifixrobots/tumblr-dms
+module github.com/beeper/tumblr-dms
 
 go 1.26.0
 
