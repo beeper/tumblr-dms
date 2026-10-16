@@ -58,6 +58,9 @@ func (tc *TumblrClient) HandleMatrixBlockUser(ctx context.Context, msg *bridgev2
 }
 
 func (tc *TumblrClient) resyncDMBlock(portal *bridgev2.Portal) {
+	if time.Now().UnixNano() < tc.dmBlockRetryAfter.Load() {
+		return
+	}
 	owner, peer, err := tc.blockTarget(portal)
 	if err != nil || portal.MXID == "" {
 		return
@@ -95,8 +98,19 @@ func (tc *TumblrClient) resyncDMBlock(portal *bridgev2.Portal) {
 				return nil, err
 			}
 			wasBlocked := current.UserBlocked
+			if time.Now().UnixNano() < tc.dmBlockRetryAfter.Load() {
+				return nil, nil
+			}
 			blogs, err := client.ListBlockedBlogs(ctx, owner)
 			if err != nil {
+				if ctx.Err() == nil {
+					retryAfter := time.Now().Add(30 * time.Second).UnixNano()
+					for previous := tc.dmBlockRetryAfter.Load(); previous < retryAfter; previous = tc.dmBlockRetryAfter.Load() {
+						if tc.dmBlockRetryAfter.CompareAndSwap(previous, retryAfter) {
+							break
+						}
+					}
+				}
 				return nil, tc.handleRemoteError(err)
 			}
 			blocked := false
