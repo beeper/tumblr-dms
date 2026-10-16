@@ -317,6 +317,27 @@ func (tc *TumblrClient) processSelectedConversationJob(
 	ctx context.Context,
 	selected *tumblrdb.ConversationJob,
 ) error {
+	err := tc.processSelectedConversationJobWithBlockCheck(ctx, selected)
+	var check *conversationBlockCheck
+	if !errors.As(err, &check) {
+		return err
+	}
+	client, err := tc.tumblrClient()
+	if err == nil {
+		var blogs []tumblr.Blog
+		blogs, err = client.ListBlockedBlogs(ctx, check.owner)
+		for _, blog := range blogs {
+			check.blocked = check.blocked || blog.UUID == check.peer
+		}
+	}
+	check.err = tc.handleRemoteError(err)
+	return tc.processSelectedConversationJobWithBlockCheck(context.WithValue(ctx, conversationBlockCheckKey{}, check), selected)
+}
+
+func (tc *TumblrClient) processSelectedConversationJobWithBlockCheck(
+	ctx context.Context,
+	selected *tumblrdb.ConversationJob,
+) error {
 	if selected == nil {
 		return nil
 	}
@@ -346,6 +367,10 @@ func (tc *TumblrClient) processSelectedConversationJob(
 	if errors.Is(err, errTumblrConversationJobSuperseded) {
 		tc.wakeInboundSync()
 		return nil
+	}
+	var check *conversationBlockCheck
+	if errors.As(err, &check) {
+		return err
 	}
 	if err != nil {
 		nextAttempt := time.Now().Add(tumblrConversationJobBackoff(job.AttemptCount + 1))
