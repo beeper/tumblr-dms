@@ -19,7 +19,14 @@ func (tc *TumblrClient) blockTarget(portal *bridgev2.Portal) (owner, peer string
 	if err != nil {
 		return "", "", err
 	}
-	if !tumblr.IsBlogUUID(meta.SelectedBlogUUID) || string(tc.userLogin.ID) != meta.SelectedBlogUUID || portal == nil || portal.Portal == nil || portal.MXID == "" || portal.RoomType != database.RoomTypeDM || portal.PortalKey != tc.portalKey(string(portal.ID)) || isPendingDMPortalID(string(portal.ID)) || !tumblr.IsBlogUUID(string(portal.OtherUserID)) || tumblrUserIDMatchesLogin(portal.OtherUserID, meta) {
+	if !tumblr.IsBlogUUID(meta.SelectedBlogUUID) ||
+		string(tc.userLogin.ID) != meta.SelectedBlogUUID ||
+		portal == nil || portal.Portal == nil ||
+		portal.RoomType != database.RoomTypeDM ||
+		portal.PortalKey != tc.portalKey(string(portal.ID)) ||
+		isPendingDMPortalID(string(portal.ID)) ||
+		!tumblr.IsBlogUUID(string(portal.OtherUserID)) ||
+		tumblrUserIDMatchesLogin(portal.OtherUserID, meta) {
 		return "", "", bridgev2.ErrNonDMBlockUser
 	}
 	return meta.SelectedBlogUUID, string(portal.OtherUserID), nil
@@ -40,6 +47,9 @@ func (tc *TumblrClient) HandleMatrixBlockUser(ctx context.Context, msg *bridgev2
 	if err != nil {
 		return err
 	}
+	if msg.Portal.MXID == "" {
+		return bridgev2.ErrNonDMBlockUser
+	}
 	client, err := tc.tumblrClient()
 	if err != nil {
 		return err
@@ -49,17 +59,23 @@ func (tc *TumblrClient) HandleMatrixBlockUser(ctx context.Context, msg *bridgev2
 
 func (tc *TumblrClient) resyncDMBlock(portal *bridgev2.Portal) {
 	owner, peer, err := tc.blockTarget(portal)
-	if err != nil {
+	if err != nil || portal.MXID == "" {
 		return
 	}
 	if last, ok := tc.dmBlockResyncLast.Load(portal.PortalKey); ok && time.Since(last.(time.Time)) < 10*time.Minute {
 		return
 	}
-	tc.dmBlockResyncLast.Store(portal.PortalKey, time.Now())
 	roomID := portal.MXID
 	go tc.userLogin.QueueRemoteEvent(&simplevent.ChatResync{
 		EventMeta: simplevent.EventMeta{Type: bridgev2.RemoteEventChatResync, PortalKey: portal.PortalKey},
 		GetChatInfoFunc: func(ctx context.Context, current *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
+			if _, loaded := tc.dmBlockResyncInFlight.LoadOrStore(portal.PortalKey, true); loaded {
+				return nil, nil
+			}
+			defer tc.dmBlockResyncInFlight.Delete(portal.PortalKey)
+			if last, ok := tc.dmBlockResyncLast.Load(portal.PortalKey); ok && time.Since(last.(time.Time)) < 10*time.Minute {
+				return nil, nil
+			}
 			if !tc.beginOwnedOperation() {
 				return nil, errTumblrClientRetired
 			}
@@ -87,6 +103,7 @@ func (tc *TumblrClient) resyncDMBlock(portal *bridgev2.Portal) {
 			for _, blog := range blogs {
 				blocked = blocked || blog.UUID == peer
 			}
+			tc.dmBlockResyncLast.Store(portal.PortalKey, time.Now())
 			if blocked == wasBlocked {
 				return nil, nil
 			}

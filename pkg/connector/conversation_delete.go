@@ -18,6 +18,19 @@ import (
 	"github.com/beeper/tumblr-dms/pkg/tumblr"
 )
 
+type conversationBlockCheckKey struct{}
+
+type conversationBlockCheck struct {
+	owner, peer string
+	roomID      id.RoomID
+	blocked     bool
+	err         error
+}
+
+func (*conversationBlockCheck) Error() string {
+	return "tumblr conversation deletion requires a block check"
+}
+
 func (tc *TumblrClient) resumeRemoteConversationDeleteWithSubmissionLock(
 	ctx context.Context,
 	conversationID string,
@@ -85,22 +98,6 @@ func (tc *TumblrClient) handleRemoteConversationDelete(
 		}
 		return fmt.Errorf("failed to confirm deleted Tumblr conversation: %w", probeErr)
 	}
-	portal, err := tc.connector.Bridge.GetExistingPortalByKey(ctx, tc.portalKey(conversationID))
-	if err != nil {
-		return err
-	}
-	if owner, peer, targetErr := tc.blockTarget(portal); targetErr == nil {
-		blockedBlogs, blockErr := client.ListBlockedBlogs(ctx, owner)
-		if blockErr != nil {
-			return fmt.Errorf("failed to check Tumblr blocks before conversation deletion: %w", tc.handleRemoteError(blockErr))
-		}
-		for _, blog := range blockedBlogs {
-			if blog.UUID == peer {
-				tc.resyncDMBlock(portal)
-				return nil
-			}
-		}
-	}
 	// Outbound recovery can discover the deletion before a sync job exists.
 	// Persist the cleanup continuation before terminalizing sends so a crash or
 	// later portal failure cannot strand a stale local room indefinitely.
@@ -126,6 +123,31 @@ func (tc *TumblrClient) handleRemoteConversationDelete(
 					Msg("Tumblr still lists a conversation whose history returned not found, keeping its room")
 			}
 			return nil
+		}
+		portal, loadErr := tc.connector.Bridge.GetExistingPortalByKey(ctx, tc.portalKey(conversationID))
+		if loadErr != nil {
+			return loadErr
+		}
+		check, ok := ctx.Value(conversationBlockCheckKey{}).(*conversationBlockCheck)
+		owner, peer, targetErr := tc.blockTarget(portal)
+		if ok && (targetErr != nil || portal.MXID == "") {
+			return fmt.Errorf("tumblr deletion target became ineligible during block check")
+		}
+		if targetErr == nil && portal.MXID != "" {
+			if !ok {
+				tc.wakeInboundSync()
+				return &conversationBlockCheck{owner: owner, peer: peer, roomID: portal.MXID}
+			}
+			if check.owner != owner || check.peer != peer || check.roomID != portal.MXID {
+				return fmt.Errorf("tumblr deletion target changed during block check")
+			}
+			if check.err != nil {
+				return fmt.Errorf("failed to check Tumblr blocks before conversation deletion: %w", check.err)
+			}
+			if check.blocked {
+				tc.resyncDMBlock(portal)
+				return fmt.Errorf("tumblr conversation is unavailable while its peer is blocked")
+			}
 		}
 	}
 	if err := tc.terminalizeOutboundConversation(ctx, conversationID); err != nil {

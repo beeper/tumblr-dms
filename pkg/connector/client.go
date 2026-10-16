@@ -25,7 +25,9 @@ import (
 )
 
 type TumblrClient struct {
-	dmBlockResyncLast  sync.Map
+	dmBlockResyncLast     sync.Map
+	dmBlockResyncInFlight sync.Map
+
 	connector          *TumblrConnector
 	userLogin          *bridgev2.UserLogin
 	client             *tumblr.Client
