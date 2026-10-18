@@ -32,8 +32,6 @@ const (
 	maxUnsupportedMessageTypeRunes = 80
 	maxTumblrTimestampFutureSkew   = 24 * time.Hour
 	tumblrPortalMutationTimeout    = 2 * time.Minute
-	tumblrRemoteDeliveryTimeout    = 5 * time.Minute
-	tumblrRemoteDeliveryPoll       = 100 * time.Millisecond
 	unknownTumblrUserID            = networkid.UserID("unknown-tumblr-user")
 )
 
@@ -284,9 +282,6 @@ func (tc *TumblrClient) queueFetchedConversation(
 	if err != nil {
 		return err
 	}
-	if err = tc.confirmFetchedConversationMessagesStored(ctx, conversation, heldMessageIDs); err != nil {
-		return err
-	}
 	if len(heldMessageIDs) > 0 {
 		// Held messages were deliberately not handed to bridgev2. Keep the
 		// durable head unchanged so this fetch is retried without losing them.
@@ -311,33 +306,6 @@ func (tc *TumblrClient) queueFetchedConversation(
 		time.Now(),
 	); err != nil {
 		return fmt.Errorf("failed to save Tumblr conversation sync boundary: %w", err)
-	}
-	return nil
-}
-
-func (tc *TumblrClient) confirmFetchedConversationMessagesStored(
-	ctx context.Context,
-	conversation tumblr.Conversation,
-	heldMessageIDs map[string]struct{},
-) error {
-	portalKey := tc.portalKey(conversation.ID)
-	seenIDs := make(map[string]struct{}, len(conversation.Messages.Data))
-	for _, message := range conversation.Messages.Data {
-		if !validRemoteID(message.ID) {
-			return fmt.Errorf("fetched Tumblr conversation contains an invalid message ID")
-		}
-		if _, duplicate := seenIDs[message.ID]; duplicate {
-			continue
-		}
-		seenIDs[message.ID] = struct{}{}
-		if _, held := heldMessageIDs[message.ID]; held {
-			// queueFetchedConversation returns a typed retry error for these IDs
-			// before it can advance the durable conversation head.
-			continue
-		}
-		if err := tc.confirmTumblrMessageStored(ctx, portalKey, message.ID); err != nil {
-			return fmt.Errorf("failed to confirm fetched Tumblr conversation was stored: %w", err)
-		}
 	}
 	return nil
 }
@@ -496,10 +464,8 @@ func (tc *TumblrClient) queueConversationMessageChain(
 	fallbackTimestamp time.Time,
 	outboundTransactions map[string]networkid.TransactionID,
 ) error {
-	deliveryCtx, cancelDelivery := context.WithTimeout(ctx, tumblrRemoteDeliveryTimeout)
-	defer cancelDelivery()
 	for _, message := range messages {
-		if err := deliveryCtx.Err(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		evt := tc.messageEventFromMessageWithTransaction(
@@ -512,27 +478,17 @@ func (tc *TumblrClient) queueConversationMessageChain(
 		if evt == nil {
 			return fmt.Errorf("tumblr message has an invalid ID")
 		}
-		result := tc.queueRemoteEvent(evt)
-		if err := remoteEventQueueError(result, "tumblr message"); err != nil && !result.Ignored {
-			return err
-		}
-		// The durable message row is the completion signal. Polling it avoids
-		// depending on PostHandle, which bridgev2 does not call after every panic.
-		if err := tc.waitForTumblrMessageStored(deliveryCtx, portalKey, message.ID); err != nil {
+		if err := remoteEventQueueError(tc.queueRemoteEvent(evt), "tumblr message"); err != nil {
 			return err
 		}
 	}
 	if readReceipt == nil {
 		return nil
 	}
-	if err := deliveryCtx.Err(); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	result := tc.queueRemoteEvent(readReceipt)
-	if err := remoteEventQueueError(result, "tumblr read receipt"); err != nil && !result.Ignored {
-		return err
-	}
-	return nil
+	return remoteEventQueueError(tc.queueRemoteEvent(readReceipt), "tumblr read receipt")
 }
 
 func (tc *TumblrClient) confirmTumblrPortalExists(ctx context.Context, portalKey networkid.PortalKey) error {
@@ -553,67 +509,8 @@ func (tc *TumblrClient) confirmTumblrPortalExists(ctx context.Context, portalKey
 	return nil
 }
 
-func (tc *TumblrClient) confirmTumblrMessageStored(ctx context.Context, portalKey networkid.PortalKey, messageID string) error {
-	stored, err := tc.tumblrMessageStored(ctx, portalKey, messageID)
-	if err != nil {
-		return err
-	}
-	if !stored {
-		return fmt.Errorf("tumblr message was not stored after handling")
-	}
-	return nil
-}
-
-func (tc *TumblrClient) waitForTumblrMessageStored(
-	ctx context.Context,
-	portalKey networkid.PortalKey,
-	messageID string,
-) error {
-	ticker := time.NewTicker(tumblrRemoteDeliveryPoll)
-	defer ticker.Stop()
-	for {
-		stored, err := tc.tumblrMessageStored(ctx, portalKey, messageID)
-		if err != nil {
-			return err
-		}
-		if stored {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("timed out waiting for Tumblr message delivery: %w", ctx.Err())
-		case <-ticker.C:
-		}
-	}
-}
-
-func (tc *TumblrClient) tumblrMessageStored(
-	ctx context.Context,
-	portalKey networkid.PortalKey,
-	messageID string,
-) (bool, error) {
-	if tc == nil || tc.connector == nil || tc.connector.Bridge == nil || tc.connector.Bridge.DB == nil {
-		return false, fmt.Errorf("tumblr message database is unavailable")
-	}
-	existing, err := tc.connector.Bridge.DB.Message.GetFirstPartByID(
-		ctx,
-		portalKey.Receiver,
-		tumblrid.MakeMessageID(messageID),
-	)
-	if err != nil {
-		return false, fmt.Errorf("failed to confirm Tumblr message delivery: %w", err)
-	}
-	if existing == nil {
-		return false, nil
-	}
-	if existing.Room != portalKey {
-		return false, fmt.Errorf("tumblr message was stored in a different conversation")
-	}
-	return true, nil
-}
-
 func remoteEventQueueError(result bridgev2.EventHandlingResult, description string) error {
-	if result.Success && !result.Ignored {
+	if result.Success {
 		return nil
 	}
 	if result.Error != nil {
