@@ -8,7 +8,6 @@ import (
 	"os"
 
 	"maunium.net/go/mautrix/bridgev2"
-	"maunium.net/go/mautrix/bridgev2/matrix"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
@@ -371,55 +370,20 @@ func downloadMatrixMediaBounded(
 	file *event.EncryptedFileInfo,
 	maxBytes int64,
 ) ([]byte, error) {
-	asIntent, ok := intent.(*matrix.ASIntent)
-	if !ok || asIntent.Matrix == nil {
-		var data []byte
-		err := intent.DownloadMediaToFile(ctx, uri, file, false, func(download *os.File) error {
-			var err error
-			data, err = io.ReadAll(io.LimitReader(download, maxBytes+1))
-			if err != nil {
-				return fmt.Errorf("read downloaded media: %w", err)
-			}
-			if int64(len(data)) > maxBytes {
-				return errMatrixImageTooLarge
-			}
-			return nil
-		})
-		return data, err
-	}
-
-	if file != nil {
-		uri = file.URL
-		if err := file.PrepareForDecryption(); err != nil {
-			return nil, err
+	var data []byte
+	err := intent.DownloadMediaToFile(ctx, uri, file, false, func(download *os.File) error {
+		if info, err := download.Stat(); err == nil && info.Size() > maxBytes {
+			return errMatrixImageTooLarge
 		}
-	}
-	parsedURI, err := uri.Parse()
-	if err != nil {
-		return nil, err
-	}
-	resp, err := asIntent.Matrix.Download(ctx, parsedURI)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send download request: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.ContentLength > maxBytes {
-		return nil, errMatrixImageTooLarge
-	}
-
-	reader := io.ReadCloser(resp.Body)
-	if file != nil {
-		reader = file.DecryptStream(resp.Body)
-	}
-	data, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-	if int64(len(data)) > maxBytes {
-		return nil, errMatrixImageTooLarge
-	}
-	if err = reader.Close(); err != nil {
-		return nil, fmt.Errorf("failed to close response body: %w", err)
-	}
-	return data, nil
+		var err error
+		data, err = io.ReadAll(io.LimitReader(download, maxBytes+1))
+		if err != nil {
+			return fmt.Errorf("read downloaded media: %w", err)
+		}
+		if int64(len(data)) > maxBytes {
+			return errMatrixImageTooLarge
+		}
+		return nil
+	})
+	return data, err
 }
