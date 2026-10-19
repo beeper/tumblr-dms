@@ -510,7 +510,7 @@ func (tc *TumblrClient) confirmTumblrPortalExists(ctx context.Context, portalKey
 }
 
 func remoteEventQueueError(result bridgev2.EventHandlingResult, description string) error {
-	if result.Success {
+	if result.Success && !result.Queued {
 		return nil
 	}
 	if result.Error != nil {
