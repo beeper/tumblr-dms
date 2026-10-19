@@ -581,9 +581,12 @@ func (tl *TumblrLogin) SubmitCookies(ctx context.Context, cookies map[string]str
 func (tl *TumblrLogin) submitBrowserVerification(ctx context.Context, input map[string]string) (*bridgev2.LoginStep, error) {
 	blackboxSessionID := strings.TrimSpace(input[loginFieldBlackbox])
 	browserUserAgent := normalizeOptionalHeaderCredential(input[loginFieldUserAgent])
-	if blackboxSessionID == "" || browserUserAgent == "" {
+	if browserUserAgent == "" {
 		tl.clearPendingAuthentication()
 		return tl.credentialsStep("Tumblr's secure sign-in check did not finish. Enter your credentials and try again."), nil
+	}
+	if blackboxSessionID == "" && tl.User != nil {
+		tl.User.Log.Debug().Msg("Tumblr browser verification returned no Blackbox session, signing in without it")
 	}
 	if tl.client != nil && tl.browserUserAgent != browserUserAgent {
 		tl.clearPendingAuthentication()
