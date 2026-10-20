@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -70,6 +71,10 @@ func (e *Error) Error() string {
 		return "tumblr API returned an empty error"
 	}
 	if len(e.Errors) > 0 {
+		status := strconv.Itoa(e.StatusCode)
+		if e.Errors[0].Code != 0 {
+			status = fmt.Sprintf("%d.%d", e.StatusCode, e.Errors[0].Code)
+		}
 		detail := e.Errors[0].Detail
 		if detail == "" {
 			detail = e.Errors[0].Title
@@ -79,9 +84,9 @@ func (e *Error) Error() string {
 			detail = safeErrorDetail(e.Status)
 		}
 		if detail == "" {
-			return fmt.Sprintf("tumblr API returned %d", e.StatusCode)
+			return fmt.Sprintf("tumblr API returned %s", status)
 		}
-		return fmt.Sprintf("tumblr API returned %d: %s", e.StatusCode, detail)
+		return fmt.Sprintf("tumblr API returned %s: %s", status, detail)
 	}
 	if status := safeErrorDetail(e.Status); status != "" {
 		return fmt.Sprintf("tumblr API returned %d: %s", e.StatusCode, status)

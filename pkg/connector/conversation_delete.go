@@ -294,6 +294,7 @@ func (tc *TumblrClient) clearDeletedConversationSeenState(conversationID string)
 
 	delete(tc.seenConversations, conversationID)
 	delete(tc.seenConversationModifiedTS, conversationID)
+	delete(tc.bridgedReadTimestamps, conversationID)
 	prefix := conversationID + "\x00"
 	kept := tc.seenMessageOrder[:0]
 	for _, cacheKey := range tc.seenMessageOrder {

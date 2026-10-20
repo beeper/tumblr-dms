@@ -144,12 +144,16 @@ func (tc *TumblrClient) inboundSyncLoop(generation *connectionGeneration, wake <
 			nextProbe := tumblrConversationHeadProbeIdle
 			if err != nil {
 				headProbeHotUntil = time.Time{}
+				if tumblr.IsForbidden(err) {
+					tc.setRemoteForbidden(generation, err)
+				}
 				if ctx.Err() == nil {
 					if log := tc.log(); log != nil {
 						log.Warn().Err(err).Msg("Tumblr conversation head probe failed")
 					}
 				}
 			} else {
+				tc.setRemoteForbidden(generation, nil)
 				if changed {
 					headProbeHotUntil = now.Add(tumblrConversationHeadProbeHotWindow)
 				}
