@@ -583,8 +583,8 @@ func (tc *TumblrClient) markPushConnected(generation *connectionGeneration) {
 	if !tc.isCurrentGeneration(generation) || !tc.loggedIn.Load() {
 		return
 	}
-	tc.pushRegistrationDown.Store(false)
-	tc.sendGenerationState(generation, status.BridgeState{StateEvent: status.StateConnected})
+	tc.pushRegistrationDown.Store(nil)
+	tc.sendLiveConnectionState(generation)
 	tc.ensureInboundSyncStarted(generation)
 }
 
@@ -592,17 +592,17 @@ func (tc *TumblrClient) markPushTransient(generation *connectionGeneration, code
 	if !tc.isCurrentGeneration(generation) || !tc.loggedIn.Load() {
 		return
 	}
-	if !tc.pushRegistrationDown.CompareAndSwap(false, true) {
+	if !tc.pushRegistrationDown.CompareAndSwap(nil, &status.BridgeState{
+		StateEvent: status.StateTransientDisconnect,
+		Error:      code,
+		Message:    message,
+	}) {
 		return
 	}
 	if log := tc.log(); log != nil && err != nil {
 		log.Warn().Err(err).Str("state_error", string(code)).Msg("Tumblr push receiver is temporarily unavailable")
 	}
-	tc.sendGenerationState(generation, status.BridgeState{
-		StateEvent: status.StateTransientDisconnect,
-		Error:      code,
-		Message:    message,
-	})
+	tc.sendLiveConnectionState(generation)
 }
 
 func (tc *TumblrClient) promotePendingPushRegistration(ctx context.Context, registration *PushRegistration) error {

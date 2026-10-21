@@ -43,7 +43,7 @@ type TumblrClient struct {
 
 	// loginMetadataLock guards every field reachable from userLogin.Metadata.
 	loginMetadataLock    sync.Mutex
-	pushRegistrationDown atomic.Bool
+	pushRegistrationDown atomic.Pointer[status.BridgeState]
 	inboundLock          sync.Mutex
 	inboundProcessLock   sync.Mutex
 	inboundGeneration    uint64
@@ -55,11 +55,15 @@ type TumblrClient struct {
 	outboundWake         chan struct{}
 	outboundPending      map[networkid.TransactionID]*outboundPendingRegistration
 
+	connectionStateLock sync.Mutex
+	remoteForbidden     atomic.Bool
+
 	syncLock sync.Mutex
 	seenLock sync.Mutex
 
 	seenConversations          map[string]struct{}
 	seenConversationModifiedTS map[string]int64
+	bridgedReadTimestamps      map[string]int64
 	seenMessages               map[string]struct{}
 	seenMessageOrder           []string
 }
@@ -92,6 +96,7 @@ func NewTumblrClient(login *bridgev2.UserLogin, connector *TumblrConnector, clie
 		saveTail:                   ready,
 		seenConversations:          make(map[string]struct{}),
 		seenConversationModifiedTS: make(map[string]int64),
+		bridgedReadTimestamps:      make(map[string]int64),
 		seenMessages:               make(map[string]struct{}),
 		outboundPending:            make(map[networkid.TransactionID]*outboundPendingRegistration),
 	}
@@ -144,6 +149,43 @@ func (tc *TumblrClient) handleRemoteError(err error) error {
 		tc.failConnect(tumblrBadCredentialsState(err))
 	}
 	return err
+}
+
+func (tc *TumblrClient) sendLiveConnectionState(generation *connectionGeneration) {
+	tc.connectionStateLock.Lock()
+	defer tc.connectionStateLock.Unlock()
+	state := status.BridgeState{StateEvent: status.StateConnected}
+	if tc.remoteForbidden.Load() {
+		state = status.BridgeState{
+			StateEvent: status.StateTransientDisconnect,
+			Error:      "tumblr-requests-forbidden",
+			Message:    "Tumblr is refusing requests from this account right now, so messages can't be sent or received. Beeper will reconnect when Tumblr allows it again.",
+		}
+	} else if pushState := tc.pushRegistrationDown.Load(); pushState != nil {
+		state = *pushState
+	}
+	tc.sendGenerationState(generation, state)
+}
+
+func (tc *TumblrClient) setRemoteForbidden(generation *connectionGeneration, err error) {
+	forbidden := err != nil
+	if !tc.isCurrentGeneration(generation) || !tc.loggedIn.Load() ||
+		!tc.remoteForbidden.CompareAndSwap(!forbidden, forbidden) {
+		return
+	}
+	if log := tc.log(); log != nil {
+		if forbidden {
+			evt := log.Warn().Err(err)
+			var apiErr *tumblr.Error
+			if errors.As(err, &apiErr) {
+				evt = evt.Str("response_body", apiErr.Body)
+			}
+			evt.Msg("Tumblr is refusing requests for this account")
+		} else {
+			log.Info().Msg("Tumblr is accepting requests for this account again")
+		}
+	}
+	tc.sendLiveConnectionState(generation)
 }
 
 func tumblrBadCredentialsState(err error) status.BridgeState {
@@ -317,7 +359,8 @@ func (tc *TumblrClient) Connect(_ context.Context) {
 	}
 	tc.setLoggedIn(false)
 	tc.sendBridgeState(status.BridgeState{StateEvent: status.StateConnecting})
-	tc.pushRegistrationDown.Store(false)
+	tc.pushRegistrationDown.Store(nil)
+	tc.remoteForbidden.Store(false)
 	go tc.runConnectionGeneration(generation)
 }
 

@@ -361,7 +361,10 @@ func (tc *TumblrClient) queueConversation(
 	if err != nil {
 		return nil, err
 	}
-	readReceipt := tc.readReceiptEventFromConversation(conversation, portalKey, fallbackTimestamp)
+	var readReceipt *simplevent.Receipt
+	if !tc.readReceiptAlreadyBridged(conversation) {
+		readReceipt = tc.readReceiptEventFromConversation(conversation, portalKey, fallbackTimestamp)
+	}
 
 	if err = tc.ensureConversationPortalForSync(
 		ctx,
@@ -380,6 +383,9 @@ func (tc *TumblrClient) queueConversation(
 		reconciliation.transactions,
 	); err != nil {
 		return nil, err
+	}
+	if readReceipt != nil {
+		tc.markReadReceiptBridged(conversation)
 	}
 	return reconciliation.heldMessageIDs, nil
 }
@@ -601,6 +607,21 @@ func (tc *TumblrClient) markConversationSeen(conversation tumblr.Conversation) (
 		newMessages = append(newMessages, message)
 	}
 	return
+}
+
+func (tc *TumblrClient) readReceiptAlreadyBridged(conversation tumblr.Conversation) bool {
+	tc.seenLock.Lock()
+	defer tc.seenLock.Unlock()
+	bridged, ok := tc.bridgedReadTimestamps[conversation.ID]
+	return ok && bridged >= conversation.LastReadTimestamp
+}
+
+func (tc *TumblrClient) markReadReceiptBridged(conversation tumblr.Conversation) {
+	tc.seenLock.Lock()
+	defer tc.seenLock.Unlock()
+	if conversation.LastReadTimestamp > tc.bridgedReadTimestamps[conversation.ID] {
+		tc.bridgedReadTimestamps[conversation.ID] = conversation.LastReadTimestamp
+	}
 }
 
 func (tc *TumblrClient) markConversationMessageSeen(conversationID, messageID string) {
