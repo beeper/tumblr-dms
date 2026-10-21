@@ -57,6 +57,7 @@ type TumblrClient struct {
 
 	connectionStateLock sync.Mutex
 	remoteForbidden     atomic.Bool
+	remoteUnavailable   atomic.Bool
 
 	syncLock sync.Mutex
 	seenLock sync.Mutex
@@ -76,14 +77,20 @@ var (
 	errTumblrClientRetired = errors.New("tumblr client was replaced")
 )
 
-const tumblrSessionSaveTimeout = 10 * time.Second
+const (
+	tumblrSessionSaveTimeout  = 10 * time.Second
+	tumblrConnectRetryBase    = 30 * time.Second
+	tumblrConnectRetryMax     = 5 * time.Minute
+	tumblrSyncFailedThreshold = 3
+)
 
 func unsupportedMatrixMessageError(err error) error {
 	return bridgev2.WrapErrorInStatus(err).
 		WithErrorAsMessage().
 		WithIsCertain(true).
 		WithSendNotice(true).
-		WithErrorReason(event.MessageStatusUnsupported)
+		WithErrorReason(event.MessageStatusUnsupported).
+		WithStatus(event.MessageStatusFail)
 }
 
 func NewTumblrClient(login *bridgev2.UserLogin, connector *TumblrConnector, client *tumblr.Client) *TumblrClient {
@@ -159,7 +166,11 @@ func (tc *TumblrClient) sendLiveConnectionState(generation *connectionGeneration
 		state = status.BridgeState{
 			StateEvent: status.StateTransientDisconnect,
 			Error:      "tumblr-requests-forbidden",
-			Message:    "Tumblr is refusing requests from this account right now, so messages can't be sent or received. Beeper will reconnect when Tumblr allows it again.",
+		}
+	} else if tc.remoteUnavailable.Load() {
+		state = status.BridgeState{
+			StateEvent: status.StateTransientDisconnect,
+			Error:      "tumblr-sync-failed",
 		}
 	} else if pushState := tc.pushRegistrationDown.Load(); pushState != nil {
 		state = *pushState
@@ -188,21 +199,36 @@ func (tc *TumblrClient) setRemoteForbidden(generation *connectionGeneration, err
 	tc.sendLiveConnectionState(generation)
 }
 
+func (tc *TumblrClient) setRemoteUnavailable(generation *connectionGeneration, err error) {
+	unavailable := err != nil
+	if !tc.isCurrentGeneration(generation) || !tc.loggedIn.Load() ||
+		!tc.remoteUnavailable.CompareAndSwap(!unavailable, unavailable) {
+		return
+	}
+	if log := tc.log(); log != nil {
+		if unavailable {
+			log.Warn().Err(err).Msg("Tumblr sync keeps failing")
+		} else {
+			log.Info().Msg("Tumblr sync is working again")
+		}
+	}
+	tc.sendLiveConnectionState(generation)
+}
+
 func tumblrBadCredentialsState(err error) status.BridgeState {
 	return tumblrBadCredentialsStateWithCode("tumblr-bad-credentials", err)
 }
 
-func tumblrBadCredentialsStateWithCode(errorCode status.BridgeStateErrorCode, _ error) status.BridgeState {
-	message := "Tumblr couldn't verify the saved sign-in. Please sign in again to reconnect to Tumblr."
-	if errorCode == "tumblr-invalid-login-metadata" {
-		message = "Tumblr sign-in information is incomplete. Please sign in again to reconnect to Tumblr."
-	}
-	return status.BridgeState{
+func tumblrBadCredentialsStateWithCode(errorCode status.BridgeStateErrorCode, err error) status.BridgeState {
+	state := status.BridgeState{
 		StateEvent: status.StateBadCredentials,
 		Error:      errorCode,
-		Message:    message,
 		UserAction: status.UserActionRelogin,
 	}
+	if err != nil {
+		state.Info = map[string]any{"go_error": err.Error()}
+	}
+	return state
 }
 
 func (tc *TumblrClient) saveUserLogin(ctx context.Context) error {
@@ -361,6 +387,7 @@ func (tc *TumblrClient) Connect(_ context.Context) {
 	tc.sendBridgeState(status.BridgeState{StateEvent: status.StateConnecting})
 	tc.pushRegistrationDown.Store(nil)
 	tc.remoteForbidden.Store(false)
+	tc.remoteUnavailable.Store(false)
 	go tc.runConnectionGeneration(generation)
 }
 
@@ -377,41 +404,42 @@ func (tc *TumblrClient) runConnectionGeneration(generation *connectionGeneration
 		tc.failGeneration(generation, status.BridgeState{
 			StateEvent: status.StateUnknownError,
 			Error:      "tumblr-client-unavailable",
-			Message:    err.Error(),
+			Info:       map[string]any{"go_error": err.Error()},
 		})
 		return
 	}
-	if err := client.Bootstrap(ctx); err != nil {
-		if log := tc.log(); log != nil {
-			log.Warn().Err(err).Msg("Failed to validate saved Tumblr session")
+	var userInfo *tumblr.UserInfoResponse
+	for attempt := 0; ; attempt++ {
+		var unexpectedCode status.BridgeStateErrorCode = "tumblr-bootstrap-failed"
+		err = client.Bootstrap(ctx)
+		if err == nil {
+			unexpectedCode = "tumblr-current-user-failed"
+			userInfo, err = client.CurrentUser(ctx)
 		}
-		tc.failGeneration(generation, connectBootstrapFailureState(err))
-		return
-	}
-	userInfo, err := client.CurrentUser(ctx)
-	if err != nil {
-		if tumblr.IsAuthError(err) {
+		if err == nil {
+			break
+		}
+		state, retry := connectFailureState(err, unexpectedCode)
+		if !retry {
 			if log := tc.log(); log != nil {
-				log.Debug().Err(err).Msg("Tumblr session validation failed")
+				log.Warn().Err(err).Str("state_error", string(state.Error)).Msg("Failed to validate saved Tumblr session")
 			}
-			tc.failGeneration(generation, tumblrBadCredentialsState(err))
+			tc.failGeneration(generation, state)
 			return
 		}
+		delay := tumblrConnectRetryDelay(attempt)
 		if log := tc.log(); log != nil {
-			log.Warn().Err(err).Msg("Failed to load Tumblr account")
+			log.Warn().Err(err).Str("state_error", string(state.Error)).Dur("retry_in", delay).
+				Msg("Tumblr is temporarily unavailable, retrying connection")
 		}
-		message := "Tumblr couldn't be reached to finish connecting. Please try again."
-		errorCode := status.BridgeStateErrorCode("tumblr-current-user-failed")
-		if tumblr.IsForbidden(err) {
-			message = "Tumblr did not allow Beeper to load this account. Please try again later."
-			errorCode = "tumblr-forbidden"
+		tc.sendGenerationState(generation, state)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
 		}
-		tc.failGeneration(generation, status.BridgeState{
-			StateEvent: status.StateUnknownError,
-			Error:      errorCode,
-			Message:    message,
-		})
-		return
 	}
 	blog, err := selectedBlogFromCurrentUser(userInfo, meta)
 	if err != nil {
@@ -464,15 +492,43 @@ func (tc *TumblrClient) runConnectionGeneration(generation *connectionGeneration
 	tc.startOutboundSync(generation)
 }
 
-func connectBootstrapFailureState(err error) status.BridgeState {
-	if tumblr.IsAuthError(err) {
-		return tumblrBadCredentialsState(err)
+// connectFailureState returns the state for a failed connection attempt and
+// whether the attempt should be retried.
+func connectFailureState(err error, unexpectedCode status.BridgeStateErrorCode) (status.BridgeState, bool) {
+	info := map[string]any{"go_error": err.Error()}
+	switch {
+	case tumblr.IsAuthError(err):
+		return tumblrBadCredentialsState(err), false
+	case tumblr.IsIncompleteSession(err):
+		return tumblrBadCredentialsStateWithCode("tumblr-incomplete-session", err), false
+	case isTumblrRequestsForbidden(err):
+		return status.BridgeState{
+			StateEvent: status.StateTransientDisconnect,
+			Error:      "tumblr-requests-forbidden",
+			Info:       info,
+		}, true
+	case isTumblrTemporaryFailure(err):
+		return status.BridgeState{
+			StateEvent: status.StateTransientDisconnect,
+			Error:      "tumblr-unavailable",
+			Info:       info,
+		}, true
+	default:
+		return status.BridgeState{
+			StateEvent: status.StateUnknownError,
+			Error:      unexpectedCode,
+			Info:       info,
+		}, false
 	}
-	return status.BridgeState{
-		StateEvent: status.StateUnknownError,
-		Error:      "tumblr-bootstrap-failed",
-		Message:    "Tumblr couldn't be reached to verify the saved sign-in. Please try again.",
+}
+
+func tumblrConnectRetryDelay(attempt int) time.Duration {
+	delay := tumblrConnectRetryBase
+	for i := 0; i < attempt && delay < tumblrConnectRetryMax; i++ {
+		delay *= 2
 	}
+	delay = min(delay, tumblrConnectRetryMax)
+	return jitterDuration(delay, delay/5)
 }
 
 func (tc *TumblrClient) Disconnect() {
@@ -596,6 +652,11 @@ func validGhostID(userID string) bool {
 }
 
 func (tc *TumblrClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, error) {
+	resp, err := tc.handleMatrixMessage(ctx, msg)
+	return resp, tc.wrapTumblrMatrixError(err, "failed to send message to Tumblr")
+}
+
+func (tc *TumblrClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, error) {
 	if !tc.beginOwnedOperation() {
 		return nil, bridgev2.ErrNotLoggedIn
 	}
@@ -829,12 +890,11 @@ func (tc *TumblrClient) sendMatrixMessageToTumblr(ctx context.Context, msg *brid
 				return tc.deletePreparedOutbound(ctx, persisted, err)
 			}
 			if collision {
-				//lint:ignore ST1005 This exact sentence is shown to the customer.
-				collisionErr := bridgev2.WrapErrorInStatus(errors.New("This chat was merged into an existing Tumblr DM. Send the message again in the replacement chat.")).
+				collisionErr := bridgev2.WrapErrorInStatus(errors.New("tumblr chat was merged into an existing conversation")).
+					WithMessage("This chat was merged into an existing Tumblr DM. Send the message again in the replacement chat.").
 					WithStatus(event.MessageStatusFail).
 					WithIsCertain(true).
-					WithSendNotice(true).
-					WithErrorAsMessage()
+					WithSendNotice(true)
 				return tc.deletePreparedOutbound(ctx, persisted, collisionErr)
 			}
 		}
@@ -921,7 +981,7 @@ func (tc *TumblrClient) sendMatrixMessageToTumblr(ctx context.Context, msg *brid
 		persisted.State = tumblrdb.OutboundSendNotSubmitted
 		persisted.TerminalAt = terminalAt
 		persisted.NextAttemptAt = nextAttemptAt
-		if finishErr := tc.finishOutboundNotSubmitted(ctx, persisted); finishErr != nil {
+		if finishErr := tc.finishOutboundNotSubmitted(ctx, persisted, rejectedErr); finishErr != nil {
 			if log := tc.log(); log != nil {
 				log.Warn().Err(errors.Join(rejectedErr, finishErr)).Msg("Tumblr message rejection will finish asynchronously")
 			}

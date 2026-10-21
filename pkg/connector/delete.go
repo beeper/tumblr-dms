@@ -2,10 +2,12 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/event"
 
 	"github.com/beeper/tumblr-dms/pkg/tumblr"
 )
@@ -15,6 +17,10 @@ const tumblrMatrixDeleteContinuationGrace = 2 * time.Minute
 var _ bridgev2.DeleteChatHandlingNetworkAPI = (*TumblrClient)(nil)
 
 func (tc *TumblrClient) HandleMatrixDeleteChat(ctx context.Context, msg *bridgev2.MatrixDeleteChat) error {
+	return tc.wrapTumblrMatrixError(tc.handleMatrixDeleteChat(ctx, msg), "failed to delete the Tumblr conversation")
+}
+
+func (tc *TumblrClient) handleMatrixDeleteChat(ctx context.Context, msg *bridgev2.MatrixDeleteChat) error {
 	if !tc.beginOwnedOperation() {
 		return errTumblrClientRetired
 	}
@@ -26,7 +32,12 @@ func (tc *TumblrClient) HandleMatrixDeleteChat(ctx context.Context, msg *bridgev
 		return fmt.Errorf("delete-chat content is required")
 	}
 	if msg.Content.DeleteForEveryone {
-		return fmt.Errorf("tumblr does not support deleting chats for everyone")
+		return bridgev2.WrapErrorInStatus(errors.New("tumblr does not support deleting chats for everyone")).
+			WithMessage("Tumblr can only delete chats for you").
+			WithErrorReason(event.MessageStatusUnsupported).
+			WithStatus(event.MessageStatusFail).
+			WithIsCertain(true).
+			WithSendNotice(true)
 	}
 	conversationID, err := conversationIDFromPortal(msg.Portal, "portal is required to delete a Tumblr conversation")
 	if err != nil {

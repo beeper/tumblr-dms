@@ -44,7 +44,11 @@ const (
 	outboundNotSubmittedMessage = "Tumblr did not receive this message. Try sending it again."
 )
 
-var errOutboundMappingConflict = errors.New("tumblr message is already mapped to another Matrix event")
+var (
+	errOutboundMappingConflict = errors.New("tumblr message is already mapped to another Matrix event")
+	errOutboundNotSubmitted    = errors.New("tumblr message was not submitted")
+	errOutboundUnconfirmed     = errors.New("tumblr did not confirm the message")
+)
 
 type outboundPendingRegistration struct {
 	message *bridgev2.MatrixMessage
@@ -540,7 +544,7 @@ func (tc *TumblrClient) prepareNextDueOutboundSend(ctx context.Context) (*tumblr
 			}
 			return send, false, err
 		}
-		if err = tc.finishOutboundNotSubmitted(ctx, send); err != nil {
+		if err = tc.finishOutboundNotSubmitted(ctx, send, nil); err != nil {
 			return nil, false, err
 		}
 		return send, false, nil
@@ -579,7 +583,7 @@ func (tc *TumblrClient) prepareNextDueOutboundSend(ctx context.Context) (*tumblr
 		send.State = tumblrdb.OutboundSendNotSubmitted
 		send.TerminalAt = terminalAt
 		send.NextAttemptAt = nextAttemptAt
-		if err = tc.finishOutboundNotSubmitted(ctx, send); err != nil {
+		if err = tc.finishOutboundNotSubmitted(ctx, send, nil); err != nil {
 			return nil, false, err
 		}
 		return send, false, nil
@@ -615,8 +619,18 @@ func (tc *TumblrClient) prepareNextDueOutboundSend(ctx context.Context) (*tumblr
 	return send, true, nil
 }
 
-func (tc *TumblrClient) finishOutboundNotSubmitted(ctx context.Context, send *tumblrdb.OutboundSend) error {
-	if err := tc.notifyOutboundStatusAtLeastOnce(ctx, send, outboundNotSubmittedMessage, true); err != nil {
+// finishOutboundNotSubmitted reports a send that never reached Tumblr. cause is
+// Tumblr's rejection when it is known, and nil when the send is finished later
+// from durable state.
+func (tc *TumblrClient) finishOutboundNotSubmitted(ctx context.Context, send *tumblrdb.OutboundSend, cause error) error {
+	messageStatus := bridgev2.WrapErrorInStatus(errOutboundNotSubmitted).
+		WithMessage(outboundNotSubmittedMessage).
+		WithIsCertain(true).
+		WithSendNotice(true)
+	if cause != nil {
+		messageStatus = tc.tumblrMatrixErrorStatus(cause, outboundNotSubmittedMessage)
+	}
+	if err := tc.notifyOutboundStatusAtLeastOnce(ctx, send, messageStatus); err != nil {
 		return tc.deferOutboundRecovery(ctx, send, err)
 	}
 	tc.dropOutboundPending(send.TransactionID, true)
@@ -624,7 +638,10 @@ func (tc *TumblrClient) finishOutboundNotSubmitted(ctx context.Context, send *tu
 }
 
 func (tc *TumblrClient) finishOutboundUnconfirmed(ctx context.Context, send *tumblrdb.OutboundSend) error {
-	if err := tc.notifyOutboundStatusAtLeastOnce(ctx, send, outboundUnconfirmedMessage, false); err != nil {
+	messageStatus := bridgev2.WrapErrorInStatus(errOutboundUnconfirmed).
+		WithMessage(outboundUnconfirmedMessage).
+		WithSendNotice(true)
+	if err := tc.notifyOutboundStatusAtLeastOnce(ctx, send, messageStatus); err != nil {
 		return tc.deferOutboundRecovery(ctx, send, err)
 	}
 	tc.dropOutboundPending(send.TransactionID, true)
@@ -691,7 +708,7 @@ func (tc *TumblrClient) markOutboundUnconfirmed(ctx context.Context, send *tumbl
 // notifyOutboundStatusAtLeastOnce claims one durable delivery attempt for a
 // terminal outcome. Matrix transaction IDs make retries safe if delivery
 // succeeds but the process stops before the claim is finished.
-func (tc *TumblrClient) notifyOutboundStatusAtLeastOnce(ctx context.Context, send *tumblrdb.OutboundSend, message string, isCertain bool) error {
+func (tc *TumblrClient) notifyOutboundStatusAtLeastOnce(ctx context.Context, send *tumblrdb.OutboundSend, messageStatus bridgev2.MessageStatus) error {
 	if send == nil {
 		return fmt.Errorf("tumblr outbound send is required")
 	}
@@ -718,7 +735,7 @@ func (tc *TumblrClient) notifyOutboundStatusAtLeastOnce(ctx context.Context, sen
 	}
 	send.StatusClaimToken = claimToken
 	send.StatusClaimExpiresAt = claimExpiresAt
-	if err := tc.sendOutboundStatusWithCertainty(ctx, send, event.MessageStatusRetriable, message, isCertain); err != nil {
+	if err := tc.sendOutboundStatus(ctx, send, &messageStatus); err != nil {
 		releaseErr := tc.connector.DB.Outbound.ReleaseStatusDelivery(ctx, send.UserLoginID, send.TransactionID, claimToken)
 		send.StatusClaimToken = ""
 		send.StatusClaimExpiresAt = time.Time{}
@@ -860,22 +877,16 @@ func (tc *TumblrClient) finalizeOutboundWithoutEcho(ctx context.Context, send *t
 		return err
 	}
 	tc.dropOutboundPending(send.TransactionID, true)
-	if err := tc.sendOutboundStatus(ctx, send, event.MessageStatusSuccess, ""); err != nil {
+	if err := tc.sendOutboundStatus(ctx, send, &bridgev2.MessageStatus{Status: event.MessageStatusSuccess}); err != nil {
 		return err
 	}
 	return tc.retainCompletedOutbound(ctx, send)
 }
 
-func (tc *TumblrClient) sendOutboundStatus(ctx context.Context, send *tumblrdb.OutboundSend, messageStatus event.MessageStatus, message string) error {
-	return tc.sendOutboundStatusWithCertainty(ctx, send, messageStatus, message, false)
-}
-
-func (tc *TumblrClient) sendOutboundStatusWithCertainty(
+func (tc *TumblrClient) sendOutboundStatus(
 	ctx context.Context,
 	send *tumblrdb.OutboundSend,
-	messageStatus event.MessageStatus,
-	message string,
-	isCertain bool,
+	messageStatusInfo *bridgev2.MessageStatus,
 ) error {
 	if tc == nil || tc.connector == nil || tc.connector.Bridge == nil || tc.connector.Bridge.Matrix == nil || send == nil {
 		return fmt.Errorf("matrix status sender is unavailable")
@@ -889,12 +900,6 @@ func (tc *TumblrClient) sendOutboundStatusWithCertainty(
 	}
 	if send.MatrixEventID == "" {
 		return fmt.Errorf("matrix event for Tumblr outbound status is unavailable")
-	}
-	messageStatusInfo := &bridgev2.MessageStatus{Status: messageStatus, Message: message}
-	if messageStatus != event.MessageStatusSuccess {
-		messageStatusInfo.ErrorReason = event.MessageStatusGenericError
-		messageStatusInfo.IsCertain = isCertain
-		messageStatusInfo.SendNotice = true
 	}
 	eventInfo := &bridgev2.MessageStatusEventInfo{
 		RoomID:        send.MatrixRoomID,
