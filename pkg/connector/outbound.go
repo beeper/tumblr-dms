@@ -628,7 +628,7 @@ func (tc *TumblrClient) finishOutboundNotSubmitted(ctx context.Context, send *tu
 		WithIsCertain(true).
 		WithSendNotice(true)
 	if cause != nil {
-		messageStatus = tc.tumblrMatrixErrorStatus(cause, outboundNotSubmittedMessage)
+		messageStatus = tc.tumblrMatrixErrorStatus(cause, outboundNotSubmittedMessage).WithIsCertain(true)
 	}
 	if err := tc.notifyOutboundStatusAtLeastOnce(ctx, send, messageStatus); err != nil {
 		return tc.deferOutboundRecovery(ctx, send, err)

@@ -57,8 +57,7 @@ func isTumblrRequestsForbidden(err error) bool {
 }
 
 // wrapTumblrMatrixError maps a failure from a Matrix event handler to a
-// message status. Handlers only return errors before anything reaches Tumblr
-// or when Tumblr definitely rejected the request, so every outcome is certain.
+// message status.
 func (tc *TumblrClient) wrapTumblrMatrixError(err error, fallback string) error {
 	if err == nil || errors.As(err, &bridgev2.MessageStatus{}) {
 		return err
@@ -67,12 +66,15 @@ func (tc *TumblrClient) wrapTumblrMatrixError(err error, fallback string) error 
 }
 
 func (tc *TumblrClient) tumblrMatrixErrorStatus(err error, fallback string) bridgev2.MessageStatus {
-	wrapped := bridgev2.WrapErrorInStatus(err).WithIsCertain(true).WithSendNotice(true)
+	wrapped := bridgev2.WrapErrorInStatus(err).WithSendNotice(true)
+	// Only a definite rejection by Tumblr, or failing before any request, proves
+	// the action didn't happen. Other failures may come after Tumblr acted.
+	rejected := wrapped.WithIsCertain(true)
 	if errors.Is(err, bridgev2.ErrNotLoggedIn) {
-		return wrapped.WithMessage("not connected to Tumblr")
+		return rejected.WithMessage("not connected to Tumblr")
 	}
 	if tumblr.IsSessionInvalid(err) {
-		return wrapped.
+		return rejected.
 			WithErrorReason(event.MessageStatusNetworkError).
 			WithMessage("Tumblr sign-in expired, reconnect Tumblr and try again")
 	}
@@ -80,7 +82,7 @@ func (tc *TumblrClient) tumblrMatrixErrorStatus(err error, fallback string) brid
 	if errors.As(err, &sendErr) && sendErr.AuthRefreshFailed() {
 		// The rejection may only have been caused by stale credentials, and
 		// refreshing them failed for another reason, so the sign-in may still be valid.
-		return wrapped.WithMessage("couldn't refresh the Tumblr sign-in, try again")
+		return rejected.WithMessage("couldn't refresh the Tumblr sign-in, try again")
 	}
 	var apiErr *tumblr.Error
 	if !errors.As(err, &apiErr) {
@@ -88,26 +90,26 @@ func (tc *TumblrClient) tumblrMatrixErrorStatus(err error, fallback string) brid
 	}
 	switch {
 	case apiErr.StatusCode == http.StatusForbidden && tc.remoteForbidden.Load():
-		return wrapped.
+		return rejected.
 			WithErrorReason(event.MessageStatusNetworkError).
 			WithMessage("Tumblr is refusing requests from this account right now, try again later")
 	case apiErr.StatusCode == http.StatusForbidden:
-		return wrapped.
+		return rejected.
 			WithErrorReason(event.MessageStatusNoPermission).
 			WithStatus(event.MessageStatusFail).
 			WithMessage("Tumblr didn't allow this")
 	case apiErr.StatusCode == http.StatusNotFound:
-		return wrapped.
+		return rejected.
 			WithErrorReason(event.MessageStatusNoPermission).
 			WithStatus(event.MessageStatusFail).
 			WithMessage("this Tumblr conversation is no longer available")
 	case apiErr.StatusCode == http.StatusRequestEntityTooLarge:
-		return wrapped.
+		return rejected.
 			WithErrorReason(event.MessageStatusUnsupported).
 			WithStatus(event.MessageStatusFail).
 			WithMessage("too large for Tumblr")
 	case apiErr.StatusCode == http.StatusTooManyRequests:
-		return wrapped.
+		return rejected.
 			WithErrorReason(event.MessageStatusNetworkError).
 			WithMessage("Tumblr is rate limiting requests, try again later")
 	case apiErr.StatusCode >= http.StatusInternalServerError:
@@ -115,7 +117,7 @@ func (tc *TumblrClient) tumblrMatrixErrorStatus(err error, fallback string) brid
 			WithErrorReason(event.MessageStatusNetworkError).
 			WithMessage("Tumblr is temporarily unavailable, try again later")
 	case apiErr.StatusCode >= http.StatusBadRequest:
-		return wrapped.
+		return rejected.
 			WithErrorReason(event.MessageStatusNetworkError).
 			WithStatus(event.MessageStatusFail).
 			WithMessage("Tumblr rejected the request")
