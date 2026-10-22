@@ -122,6 +122,7 @@ func (tc *TumblrClient) inboundSyncLoop(generation *connectionGeneration, wake <
 	defer headProbe.Stop()
 	observedHeads := make(map[string]string)
 	headProbeHotUntil := time.Time{}
+	headProbeFailures := 0
 	deletionReconcile := time.NewTimer(jitterDuration(
 		tumblrDeletionReconciliationStart,
 		tumblrDeletionReconciliationStart,
@@ -146,6 +147,11 @@ func (tc *TumblrClient) inboundSyncLoop(generation *connectionGeneration, wake <
 				headProbeHotUntil = time.Time{}
 				if tumblr.IsForbidden(err) {
 					tc.setRemoteForbidden(generation, err)
+				} else if !tumblr.IsAuthError(err) && ctx.Err() == nil {
+					headProbeFailures++
+					if headProbeFailures >= tumblrSyncFailedThreshold {
+						tc.setRemoteUnavailable(generation, err)
+					}
 				}
 				if ctx.Err() == nil {
 					if log := tc.log(); log != nil {
@@ -153,6 +159,8 @@ func (tc *TumblrClient) inboundSyncLoop(generation *connectionGeneration, wake <
 					}
 				}
 			} else {
+				headProbeFailures = 0
+				tc.setRemoteUnavailable(generation, nil)
 				tc.setRemoteForbidden(generation, nil)
 				if changed {
 					headProbeHotUntil = now.Add(tumblrConversationHeadProbeHotWindow)

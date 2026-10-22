@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"strings"
 
 	"maunium.net/go/mautrix"
@@ -25,7 +24,7 @@ func (tc *TumblrClient) ResolveIdentifier(ctx context.Context, identifier string
 	defer tc.endOwnedOperation()
 	normalized := tumblr.NormalizeBlogName(identifier)
 	if normalized == "" {
-		return nil, errors.New("blog name is empty")
+		return nil, bridgev2.RespError(mautrix.MInvalidParam.WithMessage("Enter a Tumblr blog name"))
 	}
 	if createChat {
 		return nil, bridgev2.RespError(mautrix.MUnrecognized.WithMessage(
@@ -47,7 +46,7 @@ func (tc *TumblrClient) ResolveIdentifier(ctx context.Context, identifier string
 		if tumblr.IsNotFound(err) {
 			return nil, nil
 		}
-		return nil, tc.handleRemoteError(err)
+		return nil, wrapTumblrRespError(tc.handleRemoteError(err))
 	}
 	if resp == nil || resp.Blog == nil || tumblrBlogUserID(*resp.Blog) == "" {
 		return nil, nil
@@ -77,13 +76,13 @@ func (tc *TumblrClient) SearchUsers(ctx context.Context, query string) ([]*bridg
 	}
 	resp, err := client.SearchParticipantSuggestions(ctx, meta.SelectedBlogName, query, 10)
 	if err != nil {
-		return nil, tc.handleRemoteError(err)
+		return nil, wrapTumblrRespError(tc.handleRemoteError(err))
 	}
 	results := make([]*bridgev2.ResolveIdentifierResponse, 0, len(resp.Blogs))
 	for _, blog := range resp.Blogs {
 		blog, err = tc.hydrateSuggestionBlog(ctx, client, blog)
 		if err != nil {
-			return nil, err
+			return nil, wrapTumblrRespError(err)
 		}
 		resolveResp, err := tc.resolveResponseForBlog(ctx, blog)
 		if err != nil {

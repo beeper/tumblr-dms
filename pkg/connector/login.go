@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
@@ -129,6 +130,8 @@ type TumblrLogin struct {
 }
 
 var tumblrReauthLocks sync.Map
+
+var errSelectedBlogCannotMessage = errors.New("selected tumblr blog cannot use private messages")
 
 func lockTumblrReauthentication(loginID networkid.UserLoginID) func() {
 	lockValue, _ := tumblrReauthLocks.LoadOrStore(loginID, &sync.Mutex{})
@@ -468,7 +471,7 @@ func (tl *TumblrLogin) SubmitUserInput(ctx context.Context, input map[string]str
 	case loginStepIDBlog:
 		return tl.submitBlog(ctx, input)
 	default:
-		return nil, fmt.Errorf("unexpected tumblr login step")
+		return nil, tumblrLoginSessionExpiredError()
 	}
 }
 
@@ -502,7 +505,7 @@ func (tl *TumblrLogin) submitTwoFactor(ctx context.Context, input map[string]str
 
 func (tl *TumblrLogin) submitPassword(ctx context.Context, blackboxSessionID string) (*bridgev2.LoginStep, error) {
 	if tl.client == nil || tl.identifier == "" || tl.password == "" {
-		return nil, fmt.Errorf("tumblr password login is not ready")
+		return nil, tumblrLoginSessionExpiredError()
 	}
 	err := tl.client.PasswordLogin(ctx, tumblr.PasswordLoginRequest{
 		Identifier:        tl.identifier,
@@ -541,7 +544,7 @@ func (tl *TumblrLogin) submitPassword(ctx context.Context, blackboxSessionID str
 		case tumblr.IsLoginInputError(err) && tl.twoFactor != "":
 			tl.twoFactor = ""
 			return tl.twoFactorStep("That authentication code was not accepted. Check the code and try again."), nil
-		case tumblrLoginStatusCode(err) == http.StatusUnauthorized:
+		case tumblrHTTPStatus(err) == http.StatusUnauthorized:
 			tl.clearPendingAuthentication()
 			return tl.credentialsStep("Tumblr did not accept that email and password. Check the registered account email and password and try again."), nil
 		case tumblr.IsLoginInputError(err):
@@ -566,7 +569,7 @@ func (tl *TumblrLogin) submitBlog(ctx context.Context, input map[string]string) 
 		return tl.blogStep("Choose the Tumblr inbox you want to connect."), nil
 	}
 	if tl.client == nil || tl.userInfo == nil {
-		return nil, fmt.Errorf("tumblr login session expired before inbox selection")
+		return nil, tumblrLoginSessionExpiredError()
 	}
 	return tl.completeLogin(ctx, tl.client, tl.userInfo, &blog)
 }
@@ -680,7 +683,10 @@ func (tl *TumblrLogin) finishAuthentication(ctx context.Context, client *tumblr.
 			return nil, tumblrReauthMismatchError("The saved Tumblr blog is missing its exact account ID. Remove it and connect it again.")
 		}
 		blog, err := selectedBlogFromCurrentUser(userInfo, overrideMeta)
-		if err != nil {
+		if errors.Is(err, errSelectedBlogCannotMessage) {
+			tl.logValidationError(err)
+			return nil, tumblrNoMessagingBlogError()
+		} else if err != nil {
 			tl.logValidationError(err)
 			return nil, tumblrReauthMismatchError("This sign-in does not include the same Tumblr blog. Sign in to the account that owns the saved blog.")
 		}
@@ -884,20 +890,8 @@ func (tl *TumblrLogin) logPasswordLoginRejection(err error, blackboxSessionID st
 	event.Msg("Tumblr native password login rejected")
 }
 
-func tumblrLoginStatusCode(err error) int {
-	var apiErr *tumblr.Error
-	if errors.As(err, &apiErr) {
-		return apiErr.StatusCode
-	}
-	var bootstrapErr *tumblr.BootstrapError
-	if errors.As(err, &bootstrapErr) {
-		return bootstrapErr.StatusCode
-	}
-	return 0
-}
-
 func tumblrLoginMustStopForStatus(err error) bool {
-	statusCode := tumblrLoginStatusCode(err)
+	statusCode := tumblrHTTPStatus(err)
 	return statusCode == http.StatusTooManyRequests || statusCode >= http.StatusInternalServerError
 }
 
@@ -909,47 +903,39 @@ func (tl *TumblrLogin) validateConnector() error {
 }
 
 func tumblrLoginValidationError(err error) error {
-	statusCode := tumblrLoginStatusCode(err)
-	if statusCode == http.StatusTooManyRequests {
-		return tumblrRateLimitedError()
-	}
-	if statusCode >= http.StatusInternalServerError {
-		return tumblrLoginUnavailableError()
-	}
-	if tumblr.IsAuthError(err) {
-		return bridgev2.RespError{
+	var mapped error
+	statusCode := tumblrHTTPStatus(err)
+	switch {
+	case statusCode == http.StatusTooManyRequests:
+		mapped = tumblrRateLimitedError()
+	case statusCode >= http.StatusInternalServerError:
+		mapped = tumblrLoginUnavailableError()
+	case tumblr.IsAuthError(err):
+		mapped = bridgev2.RespError{
 			ErrCode:    "FI.MAU.TUMBLRDMS.BAD_CREDENTIALS",
 			Err:        "Tumblr couldn't verify this sign-in. Check your credentials and try again.",
 			StatusCode: http.StatusUnauthorized,
 		}
-	}
-	if tumblr.IsIncompleteSession(err) {
-		return tumblrIncompleteLoginError()
-	}
-	if tumblr.IsForbidden(err) {
-		return bridgev2.RespError{
+	case tumblr.IsIncompleteSession(err):
+		mapped = tumblrIncompleteLoginError()
+	case tumblr.IsForbidden(err):
+		mapped = bridgev2.RespError{
 			ErrCode:    "FI.MAU.TUMBLRDMS.LOGIN_FORBIDDEN",
 			Err:        "Tumblr did not allow Beeper to finish signing in. Please try again later.",
 			StatusCode: http.StatusForbidden,
 		}
+	default:
+		mapped = tumblrLoginUnavailableError()
 	}
-	return tumblrLoginUnavailableError()
+	return fmt.Errorf("%w: %w", mapped, err)
 }
 
 func tumblrLoginUnavailableError() error {
-	return bridgev2.RespError{
-		ErrCode:    "FI.MAU.TUMBLRDMS.LOGIN_UNAVAILABLE",
-		Err:        "Tumblr couldn't be reached to finish signing in. Please try again.",
-		StatusCode: http.StatusBadGateway,
-	}
+	return bridgev2.RespError(mautrix.MUnknown.WithMessage("Tumblr couldn't be reached to finish signing in. Please try again."))
 }
 
 func tumblrRateLimitedError() error {
-	return bridgev2.RespError{
-		ErrCode:    "FI.MAU.TUMBLRDMS.RATE_LIMITED",
-		Err:        "Tumblr temporarily limited sign-in attempts. Wait a few minutes and try again.",
-		StatusCode: http.StatusTooManyRequests,
-	}
+	return bridgev2.RespError(mautrix.MLimitExceeded.WithMessage("Tumblr temporarily limited sign-in attempts. Wait a few minutes and try again.").WithStatus(http.StatusBadRequest))
 }
 
 func tumblrPasswordResetRequiredError() error {
@@ -1061,7 +1047,7 @@ func selectedBlogFromCurrentUser(info *tumblr.UserInfoResponse, meta *UserLoginM
 			continue
 		}
 		if !info.Blogs[i].CanMessage || info.Blogs[i].IsGroupChannel {
-			return nil, fmt.Errorf("selected tumblr blog cannot use private messages")
+			return nil, errSelectedBlogCannotMessage
 		}
 		blog, ok := normalizedMessagingBlog(info.Blogs[i])
 		if !ok {
