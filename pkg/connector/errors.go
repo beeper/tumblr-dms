@@ -76,15 +76,17 @@ func (tc *TumblrClient) tumblrMatrixErrorStatus(err error, fallback string) brid
 			WithErrorReason(event.MessageStatusNetworkError).
 			WithMessage("Tumblr sign-in expired, reconnect Tumblr and try again")
 	}
+	var sendErr *tumblr.MessageSendError
+	if errors.As(err, &sendErr) && sendErr.AuthRefreshFailed() {
+		// The rejection may only have been caused by stale credentials, and
+		// refreshing them failed for another reason, so the sign-in may still be valid.
+		return wrapped.WithMessage("couldn't refresh the Tumblr sign-in, try again")
+	}
 	var apiErr *tumblr.Error
 	if !errors.As(err, &apiErr) {
 		return wrapped.WithMessage(fallback)
 	}
 	switch {
-	case apiErr.IsSessionInvalid():
-		// The request was rejected for an expired session, but refreshing the
-		// session failed for another reason, so the sign-in may still be valid.
-		return wrapped.WithMessage("couldn't refresh the Tumblr sign-in, try again")
 	case apiErr.StatusCode == http.StatusForbidden && tc.remoteForbidden.Load():
 		return wrapped.
 			WithErrorReason(event.MessageStatusNetworkError).

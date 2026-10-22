@@ -61,6 +61,13 @@ func (e *MessageSendError) Unwrap() error {
 	return e.Err
 }
 
+// AuthRefreshFailed reports whether Tumblr rejected the message for its
+// credentials and loading fresh credentials afterwards failed, so the
+// rejection doesn't describe the session we have now.
+func (e *MessageSendError) AuthRefreshFailed() bool {
+	return e != nil && e.authRefreshError != nil
+}
+
 func IsMessageSendOutcomeUnknown(err error) bool {
 	var sendErr *MessageSendError
 	return errors.As(err, &sendErr) && !sendErr.Definite
