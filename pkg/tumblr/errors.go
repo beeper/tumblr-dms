@@ -169,6 +169,19 @@ func IsIncompleteSession(err error) bool {
 	return errors.As(err, &bootstrapErr) && bootstrapErr.IsIncompleteSession()
 }
 
+func NeedsEmailVerification(err error) bool {
+	var apiErr *Error
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden {
+		return false
+	}
+	for _, item := range apiErr.Errors {
+		if item.Code == 7001 {
+			return true
+		}
+	}
+	return false
+}
+
 func IsNotFound(err error) bool {
 	var apiErr *Error
 	return errors.As(err, &apiErr) && apiErr.IsNotFound()
