@@ -93,6 +93,11 @@ func (tc *TumblrClient) tumblrMatrixErrorStatus(err error, fallback string) brid
 		return rejected.
 			WithErrorReason(event.MessageStatusNetworkError).
 			WithMessage("Tumblr is refusing requests from this account right now, try again later")
+	case tumblr.NeedsEmailVerification(err):
+		return rejected.
+			WithErrorReason(event.MessageStatusNoPermission).
+			WithStatus(event.MessageStatusFail).
+			WithMessage("verify your email address on Tumblr, then try again")
 	case apiErr.StatusCode == http.StatusForbidden:
 		return rejected.
 			WithErrorReason(event.MessageStatusNoPermission).
@@ -138,6 +143,8 @@ func wrapTumblrRespError(err error) error {
 		mapped = bridgev2.RespError(mautrix.MForbidden.WithMessage("Tumblr sign-in expired. Reconnect Tumblr and try again."))
 	case statusCode == http.StatusTooManyRequests:
 		mapped = bridgev2.RespError(mautrix.MLimitExceeded.WithMessage("Tumblr is limiting requests right now. Try again later.").WithStatus(http.StatusBadRequest))
+	case tumblr.NeedsEmailVerification(err):
+		mapped = bridgev2.RespError(mautrix.MForbidden.WithMessage("Verify your email address on Tumblr, then try again."))
 	case statusCode == http.StatusForbidden:
 		mapped = bridgev2.RespError(mautrix.MForbidden.WithMessage("Tumblr didn't allow this request."))
 	case isTumblrTemporaryFailure(err):
