@@ -772,6 +772,18 @@ type PostRef struct {
 }
 
 func (p *PostRef) UnmarshalJSON(data []byte) error {
+	if trimmed := strings.TrimSpace(string(data)); strings.HasPrefix(trimmed, "[") {
+		var items []json.RawMessage
+		if err := json.Unmarshal(data, &items); err != nil {
+			return err
+		}
+		*p = PostRef{}
+		if len(items) == 0 {
+			p.State = "disabled"
+			return nil
+		}
+		return p.UnmarshalJSON(items[0])
+	}
 	var raw struct {
 		ID               json.RawMessage        `json:"id"`
 		Summary          string                 `json:"summary"`
