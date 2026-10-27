@@ -459,6 +459,9 @@ func (tc *TumblrClient) reconcileConversationHead(ctx context.Context) error {
 			if conversation.LastModifiedTimestamp > newWatermark {
 				newWatermark = conversation.LastModifiedTimestamp
 			}
+			if previousWatermark > 0 && conversation.LastModifiedTimestamp > 0 && conversation.LastModifiedTimestamp < previousWatermark {
+				continue
+			}
 			if err = tc.putLiveConversationJob(ctx, conversation.ID); err != nil {
 				return err
 			}
