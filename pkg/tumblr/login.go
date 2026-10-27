@@ -111,6 +111,9 @@ func LoginRequiresPasswordReset(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.ErrorCode == "password_reset"
 }
 
+// LoginRequiresConsent matches Tumblr error 1027 (ApiLoginRequiresGdprGuceConsent in
+// Tumblr's web client): the account hasn't accepted Tumblr's privacy and advertising
+// consent, which the web login shows as a consent prompt.
 func LoginRequiresConsent(err error) bool {
 	var apiErr *Error
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden {

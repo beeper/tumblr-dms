@@ -949,7 +949,7 @@ func tumblrPasswordResetRequiredError() error {
 func tumblrConsentRequiredError() error {
 	return bridgev2.RespError{
 		ErrCode:    "FI.MAU.TUMBLRDMS.CONSENT_REQUIRED",
-		Err:        "Tumblr requires account consent to be completed on tumblr.com before signing in.",
+		Err:        "Tumblr needs you to accept its privacy and advertising consent first. Open tumblr.com in a web browser, sign in, accept the consent prompt, then try again.",
 		StatusCode: http.StatusForbidden,
 	}
 }
