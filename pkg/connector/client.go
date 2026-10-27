@@ -418,6 +418,11 @@ func (tc *TumblrClient) runConnectionGeneration(generation *connectionGeneration
 			userInfo, err = client.CurrentUser(ctx)
 		}
 		if err == nil {
+			if _, blogErr := selectedBlogFromCurrentUser(userInfo, meta); errors.Is(blogErr, errSelectedBlogCannotMessage) {
+				err = blogErr
+			}
+		}
+		if err == nil {
 			break
 		}
 		state, retry := connectFailureState(err, unexpectedCode)
@@ -502,7 +507,7 @@ func connectFailureState(err error, unexpectedCode status.BridgeStateErrorCode) 
 		return tumblrBadCredentialsState(err), false
 	case tumblr.IsIncompleteSession(err):
 		return tumblrBadCredentialsStateWithCode("tumblr-incomplete-session", err), false
-	case isTumblrRequestsForbidden(err):
+	case isTumblrRequestsForbidden(err), errors.Is(err, errSelectedBlogCannotMessage):
 		return status.BridgeState{
 			StateEvent: status.StateTransientDisconnect,
 			Error:      "tumblr-requests-forbidden",
