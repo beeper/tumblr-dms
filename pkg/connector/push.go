@@ -38,6 +38,7 @@ var (
 )
 
 var errPushWithoutConversation = errors.New("tumblr push payload did not include a valid conversation ID")
+var errUndecryptablePush = errors.New("failed to decrypt Tumblr web push payload")
 
 var tumblrPushConfig = &bridgev2.PushConfig{
 	Web: &bridgev2.WebPushConfig{VapidKey: tumblrWebPushVAPIDKey},
@@ -956,6 +957,11 @@ func (tc *TumblrClient) handleWebPushPayload(ctx context.Context, data json.RawM
 			log.Debug().Msg("Ignoring Tumblr push without a conversation")
 		}
 		return nil
+	} else if errors.Is(err, errUndecryptablePush) {
+		if log := tc.log(); log != nil {
+			log.Warn().Err(err).Msg("Dropping Tumblr push that can't be decrypted with this login's push keys")
+		}
+		return nil
 	} else if err != nil {
 		return err
 	}
@@ -1044,7 +1050,7 @@ func (tc *TumblrClient) decodeWebPushEnvelope(envelope webPushPayload) ([]byte, 
 		privateKey,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decrypt Tumblr web push payload: %w", err)
+		return nil, fmt.Errorf("%w: %w", errUndecryptablePush, err)
 	}
 	return normalizePushJSON(decrypted), nil
 }
