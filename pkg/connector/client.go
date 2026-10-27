@@ -57,6 +57,7 @@ type TumblrClient struct {
 
 	connectionStateLock sync.Mutex
 	remoteForbidden     atomic.Bool
+	rateLimitedUntil    atomic.Int64
 	remoteUnavailable   atomic.Bool
 
 	syncLock sync.Mutex
