@@ -24,6 +24,7 @@ const (
 	tumblrJobPollInterval                = 2 * time.Second
 	tumblrJobRetryBase                   = 2 * time.Second
 	tumblrJobRetryMax                    = 5 * time.Minute
+	tumblrRateLimitCooldown              = 5 * time.Minute
 )
 
 var errTumblrConversationJobSuperseded = errors.New("tumblr conversation job was superseded")
@@ -140,7 +141,12 @@ func (tc *TumblrClient) inboundSyncLoop(generation *connectionGeneration, wake <
 		case <-wake:
 		case <-poll.C:
 		case <-headProbe.C:
+			if remaining := tc.rateLimitRemaining(); remaining > 0 {
+				headProbe.Reset(remaining)
+				continue
+			}
 			latestModifiedTS, changed, err := tc.probeChangedConversationHeads(ctx, observedHeads)
+			tc.noteRateLimit(err)
 			now := time.Now()
 			nextProbe := tumblrConversationHeadProbeIdle
 			if err != nil {
@@ -174,14 +180,24 @@ func (tc *TumblrClient) inboundSyncLoop(generation *connectionGeneration, wake <
 			}
 			headProbe.Reset(nextProbe)
 		case <-reconcile.C:
+			if remaining := tc.rateLimitRemaining(); remaining > 0 {
+				reconcile.Reset(remaining)
+				continue
+			}
 			if err := tc.reconcileConversationHead(ctx); err != nil && ctx.Err() == nil {
+				tc.noteRateLimit(err)
 				if log := tc.log(); log != nil {
 					log.Warn().Err(err).Msg("Tumblr conversation reconciliation failed")
 				}
 			}
 			reconcile.Reset(jitterDuration(tumblrReconciliationInterval, tumblrReconciliationInterval/5))
 		case <-deletionReconcile.C:
+			if remaining := tc.rateLimitRemaining(); remaining > 0 {
+				deletionReconcile.Reset(remaining)
+				continue
+			}
 			if err := tc.reconcileConversationDeletions(ctx); err != nil && ctx.Err() == nil {
+				tc.noteRateLimit(err)
 				if log := tc.log(); log != nil {
 					log.Warn().Err(err).Msg("Tumblr conversation deletion reconciliation failed")
 				}
@@ -310,6 +326,9 @@ func (tc *TumblrClient) processDueConversationJobs(ctx context.Context, limit in
 
 	processed := 0
 	for ctx.Err() == nil && (limit <= 0 || processed < limit) {
+		if tc.rateLimitRemaining() > 0 {
+			return nil
+		}
 		job, err := tc.connector.DB.Jobs.GetNextDue(ctx, tc.userLogin.ID, time.Now())
 		if err != nil {
 			return err
@@ -360,7 +379,7 @@ func (tc *TumblrClient) processSelectedConversationJob(
 		return nil
 	}
 	if err != nil {
-		nextAttempt := time.Now().Add(tumblrConversationJobBackoff(job.AttemptCount + 1))
+		nextAttempt := time.Now().Add(max(tumblrConversationJobBackoff(job.AttemptCount+1), tc.noteRateLimit(err)))
 		changed, markErr := tc.connector.DB.Jobs.MarkRetry(
 			lockCtx,
 			tc.userLogin.ID,
@@ -600,4 +619,28 @@ func classifyConversationJobError(err error) tumblrdb.JobErrorCode {
 		}
 	}
 	return tumblrdb.JobErrorUnknown
+}
+
+func (tc *TumblrClient) rateLimitRemaining() time.Duration {
+	return time.Until(time.UnixMilli(tc.rateLimitedUntil.Load()))
+}
+
+func (tc *TumblrClient) noteRateLimit(err error) time.Duration {
+	var remoteErr *tumblr.Error
+	if !errors.As(err, &remoteErr) || remoteErr.StatusCode != http.StatusTooManyRequests {
+		return 0
+	}
+	until := time.Now().Add(jitterDuration(tumblrRateLimitCooldown, tumblrRateLimitCooldown/5)).UnixMilli()
+	for {
+		current := tc.rateLimitedUntil.Load()
+		if current >= until {
+			return time.Until(time.UnixMilli(current))
+		}
+		if tc.rateLimitedUntil.CompareAndSwap(current, until) {
+			if log := tc.log(); log != nil {
+				log.Warn().Dur("pause", time.Until(time.UnixMilli(until))).Msg("Tumblr is rate limiting this login; pausing background sync")
+			}
+			return time.Until(time.UnixMilli(until))
+		}
+	}
 }
