@@ -225,6 +225,7 @@ func (tc *TumblrClient) convertTumblrImage(
 	}
 	var firstTransientErr error
 	var firstPermanentErr error
+	retryableTransientFailure := false
 	mismatchedCandidates := 0
 	for candidateIndex, image := range candidates {
 		downloaded, err := tc.downloadTumblrImage(ctx, client, image.URL, retryTransientDownloads)
@@ -237,8 +238,13 @@ func (tc *TumblrClient) convertTumblrImage(
 				if firstPermanentErr == nil {
 					firstPermanentErr = candidateErr
 				}
-			} else if firstTransientErr == nil {
-				firstTransientErr = candidateErr
+			} else {
+				if firstTransientErr == nil {
+					firstTransientErr = candidateErr
+				}
+				if !tumblr.IsServerMediaDownloadError(err) {
+					retryableTransientFailure = true
+				}
 			}
 			continue
 		}
@@ -284,7 +290,7 @@ func (tc *TumblrClient) convertTumblrImage(
 		}, false, nil
 	}
 	if firstTransientErr != nil {
-		if retryTransientDownloads || !tumblr.IsServerMediaDownloadError(firstTransientErr) {
+		if retryTransientDownloads || retryableTransientFailure {
 			return nil, false, fmt.Errorf("checked %d candidates: %w", len(candidates), firstTransientErr)
 		}
 		if mismatchedCandidates > 0 {
