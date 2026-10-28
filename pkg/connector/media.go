@@ -49,7 +49,7 @@ func (tc *TumblrClient) maxDownloadBytes() int64 {
 	return tumblr.DefaultMaxDownloadBytes
 }
 
-func (tc *TumblrClient) convertTumblrMessageWithMedia(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, message tumblr.Message) (*bridgev2.ConvertedMessage, error) {
+func (tc *TumblrClient) convertTumblrMessageWithMedia(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, message tumblr.Message, retryTransientDownloads bool) (*bridgev2.ConvertedMessage, error) {
 	postRefGIFMode := message.PostRefGIFMode()
 	if !messageCanUseImageMedia(message) {
 		if message.Type == tumblr.MessageTypePostRef {
@@ -98,7 +98,7 @@ func (tc *TumblrClient) convertTumblrMessageWithMedia(ctx context.Context, porta
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			if !permanentlyUnavailable {
+			if !permanentlyUnavailable && (retryTransientDownloads || !tumblr.IsTransientMediaDownloadError(err)) {
 				return nil, err
 			}
 			if postRefGIFMode == tumblr.PostRefGIFProbe {
@@ -131,7 +131,7 @@ func (tc *TumblrClient) convertTumblrMessageWithMedia(ctx context.Context, porta
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			if !permanentlyUnavailable {
+			if !permanentlyUnavailable && (retryTransientDownloads || !tumblr.IsTransientMediaDownloadError(err)) {
 				return nil, err
 			}
 			if log := tc.log(); log != nil {
