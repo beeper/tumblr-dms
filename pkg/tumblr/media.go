@@ -45,8 +45,9 @@ const (
 // MediaDownloadError classifies failures so callers can retry temporary source
 // failures without repeatedly retrying media that Tumblr can never serve.
 type MediaDownloadError struct {
-	Failure MediaDownloadFailure
-	message string
+	Failure    MediaDownloadFailure
+	StatusCode int
+	message    string
 }
 
 func (e *MediaDownloadError) Error() string {
@@ -63,6 +64,11 @@ func (e *MediaDownloadError) Retryable() bool {
 func IsPermanentMediaDownloadError(err error) bool {
 	var downloadErr *MediaDownloadError
 	return errors.As(err, &downloadErr) && downloadErr.Failure == MediaDownloadPermanent
+}
+
+func IsServerMediaDownloadError(err error) bool {
+	var downloadErr *MediaDownloadError
+	return errors.As(err, &downloadErr) && downloadErr.StatusCode >= http.StatusInternalServerError
 }
 
 func IsTransientMediaDownloadError(err error) bool {
@@ -444,7 +450,11 @@ func (c *Client) DownloadImage(ctx context.Context, rawURL string, maxBytes int6
 			resp.StatusCode != http.StatusRequestTimeout && resp.StatusCode != http.StatusTooManyRequests {
 			failure = MediaDownloadPermanent
 		}
-		return DownloadedImage{}, newMediaDownloadError(failure, fmt.Sprintf("download failed with HTTP %d", resp.StatusCode))
+		return DownloadedImage{}, &MediaDownloadError{
+			Failure:    failure,
+			StatusCode: resp.StatusCode,
+			message:    fmt.Sprintf("download failed with HTTP %d", resp.StatusCode),
+		}
 	}
 	if resp.ContentLength > maxBytes {
 		return DownloadedImage{}, newMediaDownloadError(MediaDownloadPermanent, fmt.Sprintf("download is larger than %d MiB", maxBytes>>20))

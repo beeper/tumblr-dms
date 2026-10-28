@@ -721,7 +721,7 @@ func (tc *TumblrClient) messageEventFromMessageWithTransaction(
 		TransactionID: transactionID,
 		Data:          message,
 		ConvertMessageFunc: func(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, data tumblr.Message) (*bridgev2.ConvertedMessage, error) {
-			return tc.convertTumblrMessageWithMedia(ctx, portal, intent, data)
+			return tc.convertTumblrMessageWithMedia(ctx, portal, intent, data, true)
 		},
 	}
 }

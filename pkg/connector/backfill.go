@@ -175,7 +175,7 @@ func (tc *TumblrClient) convertTumblrMessageForBackfill(ctx context.Context, por
 	if !messageCanUseImageMedia(message) {
 		return tc.convertTumblrMessage(message), nil
 	}
-	return tc.convertTumblrMessageWithMedia(ctx, portal, tc.backfillMediaUploader(), message)
+	return tc.convertTumblrMessageWithMedia(ctx, portal, tc.backfillMediaUploader(), message, false)
 }
 
 func (tc *TumblrClient) backfillMediaUploader() bridgev2.MatrixAPI {

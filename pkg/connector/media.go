@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/networkid"
@@ -20,6 +21,10 @@ var (
 	errMatrixImageTooLarge = errors.New("matrix image is too large")
 	errRequiredImageFormat = errors.New("image did not contain the required format")
 )
+
+const backfillMediaServerErrorAttempts = 3
+
+const backfillMediaServerErrorDelay = 2 * time.Second
 
 type matrixMediaUploadError struct {
 	err error
@@ -49,7 +54,7 @@ func (tc *TumblrClient) maxDownloadBytes() int64 {
 	return tumblr.DefaultMaxDownloadBytes
 }
 
-func (tc *TumblrClient) convertTumblrMessageWithMedia(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, message tumblr.Message) (*bridgev2.ConvertedMessage, error) {
+func (tc *TumblrClient) convertTumblrMessageWithMedia(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, message tumblr.Message, retryTransientDownloads bool) (*bridgev2.ConvertedMessage, error) {
 	postRefGIFMode := message.PostRefGIFMode()
 	if !messageCanUseImageMedia(message) {
 		if message.Type == tumblr.MessageTypePostRef {
@@ -93,6 +98,7 @@ func (tc *TumblrClient) convertTumblrMessageWithMedia(ctx context.Context, porta
 			postRefGIFCandidates,
 			"image/gif",
 			0,
+			retryTransientDownloads,
 		)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -126,7 +132,7 @@ func (tc *TumblrClient) convertTumblrMessageWithMedia(ctx context.Context, porta
 	parts := make([]*bridgev2.ConvertedMessagePart, 0, len(message.Images))
 	for index, image := range message.Images {
 		partID := tumblrImagePartID(index)
-		part, permanentlyUnavailable, err := tc.convertTumblrImage(ctx, portal, intent, client, message, image.Candidates(), "", index)
+		part, permanentlyUnavailable, err := tc.convertTumblrImage(ctx, portal, intent, client, message, image.Candidates(), "", index, retryTransientDownloads)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
@@ -208,6 +214,7 @@ func (tc *TumblrClient) convertTumblrImage(
 	candidates []tumblr.ImageAsset,
 	requiredMIMEType string,
 	logicalIndex int,
+	retryTransientDownloads bool,
 ) (*bridgev2.ConvertedMessagePart, bool, error) {
 	if len(candidates) == 0 {
 		return nil, true, fmt.Errorf("tumblr image has no downloadable candidates")
@@ -218,9 +225,10 @@ func (tc *TumblrClient) convertTumblrImage(
 	}
 	var firstTransientErr error
 	var firstPermanentErr error
+	retryableTransientFailure := false
 	mismatchedCandidates := 0
 	for candidateIndex, image := range candidates {
-		downloaded, err := client.DownloadImage(ctx, image.URL, tc.maxDownloadBytes())
+		downloaded, err := tc.downloadTumblrImage(ctx, client, image.URL, retryTransientDownloads)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, false, ctx.Err()
@@ -230,8 +238,13 @@ func (tc *TumblrClient) convertTumblrImage(
 				if firstPermanentErr == nil {
 					firstPermanentErr = candidateErr
 				}
-			} else if firstTransientErr == nil {
-				firstTransientErr = candidateErr
+			} else {
+				if firstTransientErr == nil {
+					firstTransientErr = candidateErr
+				}
+				if !tumblr.IsServerMediaDownloadError(err) {
+					retryableTransientFailure = true
+				}
 			}
 			continue
 		}
@@ -277,7 +290,13 @@ func (tc *TumblrClient) convertTumblrImage(
 		}, false, nil
 	}
 	if firstTransientErr != nil {
-		return nil, false, fmt.Errorf("checked %d candidates: %w", len(candidates), firstTransientErr)
+		if retryTransientDownloads || retryableTransientFailure {
+			return nil, false, fmt.Errorf("checked %d candidates: %w", len(candidates), firstTransientErr)
+		}
+		if mismatchedCandidates > 0 {
+			return nil, true, fmt.Errorf("checked %d candidates: %w", len(candidates), errRequiredImageFormat)
+		}
+		return nil, true, fmt.Errorf("checked %d candidates: %w", len(candidates), firstTransientErr)
 	}
 	if firstPermanentErr != nil {
 		return nil, true, fmt.Errorf("checked %d candidates: %w", len(candidates), firstPermanentErr)
@@ -286,6 +305,29 @@ func (tc *TumblrClient) convertTumblrImage(
 		return nil, true, fmt.Errorf("all %d candidates: %w", len(candidates), errRequiredImageFormat)
 	}
 	return nil, true, fmt.Errorf("tumblr image candidates produced no usable media")
+}
+
+func (tc *TumblrClient) downloadTumblrImage(
+	ctx context.Context,
+	client *tumblr.Client,
+	url string,
+	retryTransientDownloads bool,
+) (tumblr.DownloadedImage, error) {
+	downloaded, err := client.DownloadImage(ctx, url, tc.maxDownloadBytes())
+	if retryTransientDownloads {
+		return downloaded, err
+	}
+	for attempt := 1; attempt < backfillMediaServerErrorAttempts && tumblr.IsServerMediaDownloadError(err); attempt++ {
+		timer := time.NewTimer(backfillMediaServerErrorDelay * time.Duration(attempt))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return tumblr.DownloadedImage{}, ctx.Err()
+		case <-timer.C:
+		}
+		downloaded, err = client.DownloadImage(ctx, url, tc.maxDownloadBytes())
+	}
+	return downloaded, err
 }
 
 func tumblrImageFailureNotice(message tumblr.Message, index, total int) *bridgev2.ConvertedMessagePart {
