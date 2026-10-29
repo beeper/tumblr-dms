@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
+	"github.com/beeper/tumblr-dms/pkg/connector/tumblrdb"
 	"github.com/beeper/tumblr-dms/pkg/tumblr"
 )
 
@@ -96,6 +98,20 @@ func (tc *TumblrClient) handleRemoteConversationDelete(
 	if expectedRevision <= 0 || job == nil || job.Revision != expectedRevision {
 		return errTumblrConversationJobSuperseded
 	}
+	if job.DeleteRoomID == "" {
+		listed, listErr := tc.conversationStillListed(ctx, client, meta.SelectedBlogUUID, job)
+		if listErr != nil {
+			return fmt.Errorf("failed to check Tumblr conversation list before deletion: %w", listErr)
+		}
+		if listed {
+			if log := tc.log(); log != nil {
+				log.Warn().Err(probeErr).
+					Str("conversation_id_hash", logIdentifierHash(conversationID)).
+					Msg("Tumblr still lists a conversation whose history returned not found, keeping its room")
+			}
+			return nil
+		}
+	}
 	if err := tc.terminalizeOutboundConversation(ctx, conversationID); err != nil {
 		return fmt.Errorf("failed to cancel outbound sends for deleted Tumblr conversation: %w", err)
 	}
@@ -164,6 +180,95 @@ func (tc *TumblrClient) handleRemoteConversationDelete(
 			Msg("Removed Tumblr conversation after direct deletion confirmation")
 	}
 	return nil
+}
+
+func (tc *TumblrClient) conversationStillListed(
+	ctx context.Context,
+	client *tumblr.Client,
+	selectedBlogUUID string,
+	job *tumblrdb.ConversationJob,
+) (bool, error) {
+	conversationID := job.ConversationID
+	if listed, ok := tc.recentListedConversation(job); ok {
+		return listed, nil
+	}
+	walkStartedAt := time.Now()
+	limit := tc.connector.Config.ConversationSyncBatchLimit()
+	before := ""
+	seenCursors := make(map[string]struct{})
+	remoteConversationIDs := make(map[string]struct{})
+	for page := 0; page < maxConversationListPages; page++ {
+		resp, err := client.ListConversationsBefore(ctx, selectedBlogUUID, limit, before)
+		if err != nil {
+			return false, tc.handleRemoteError(err)
+		}
+		if resp == nil {
+			return false, fmt.Errorf("tumblr conversation list response is missing")
+		}
+		for _, conversation := range resp.Conversations {
+			if conversation.ID == conversationID {
+				return true, nil
+			}
+			if validRemoteID(conversation.ID) {
+				remoteConversationIDs[conversation.ID] = struct{}{}
+			}
+		}
+		nextBefore, err := resp.NextBefore()
+		if err != nil {
+			return false, err
+		}
+		nextBefore = strings.TrimSpace(nextBefore)
+		if nextBefore == "" {
+			tc.rememberListedConversations(remoteConversationIDs, walkStartedAt)
+			return false, nil
+		}
+		if _, duplicate := seenCursors[nextBefore]; duplicate {
+			return false, fmt.Errorf("tumblr conversation list cursor repeated")
+		}
+		seenCursors[nextBefore] = struct{}{}
+		before = nextBefore
+	}
+	return false, fmt.Errorf("tumblr conversation list exceeded %d pages", maxConversationListPages)
+}
+
+type queuedMissingConversation struct {
+	revision  int64
+	createdAt time.Time
+}
+
+func (tc *TumblrClient) rememberListedConversations(conversationIDs map[string]struct{}, walkStartedAt time.Time) {
+	tc.listedConversationsLock.Lock()
+	defer tc.listedConversationsLock.Unlock()
+	tc.listedConversations = maps.Clone(conversationIDs)
+	tc.listedConversationsAt = walkStartedAt
+	tc.listedMissingQueued = nil
+}
+
+func (tc *TumblrClient) rememberQueuedMissingConversations(
+	walkStartedAt time.Time,
+	queued map[string]queuedMissingConversation,
+) {
+	tc.listedConversationsLock.Lock()
+	defer tc.listedConversationsLock.Unlock()
+	if tc.listedConversationsAt.Equal(walkStartedAt) {
+		tc.listedMissingQueued = queued
+	}
+}
+
+func (tc *TumblrClient) recentListedConversation(job *tumblrdb.ConversationJob) (listed, ok bool) {
+	tc.listedConversationsLock.Lock()
+	defer tc.listedConversationsLock.Unlock()
+	if tc.listedConversations == nil || time.Since(tc.listedConversationsAt) > tumblrDeletionReconciliationInterval {
+		return false, false
+	}
+	if _, listed = tc.listedConversations[job.ConversationID]; listed {
+		return true, true
+	}
+	if tc.listedConversationsAt.After(job.UpdatedAt) {
+		return false, true
+	}
+	queued, fromSnapshot := tc.listedMissingQueued[job.ConversationID]
+	return false, fromSnapshot && queued.revision == job.Revision && queued.createdAt.Equal(job.CreatedAt)
 }
 
 func (tc *TumblrClient) deletedConversationRoomID(

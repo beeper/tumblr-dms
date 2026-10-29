@@ -59,6 +59,7 @@ const (
 			next_attempt_ts=0,
 			last_error_code='',
 			updated_ts=excluded.updated_ts
+		RETURNING revision, created_ts
 	`
 	putLiveConversationJobQuery = `
 		INSERT INTO tumblr_conversation_sync_job (
@@ -133,9 +134,16 @@ func (jq *ConversationJobQuery) Ensure(ctx context.Context, loginID networkid.Us
 	return jq.Exec(ctx, ensureConversationJobQuery, jq.BridgeID, loginID, conversationID, now.UnixMilli())
 }
 
-func (jq *ConversationJobQuery) Put(ctx context.Context, loginID networkid.UserLoginID, conversationID string) error {
+func (jq *ConversationJobQuery) Put(
+	ctx context.Context,
+	loginID networkid.UserLoginID,
+	conversationID string,
+) (revision int64, createdAt time.Time, err error) {
 	now := time.Now()
-	return jq.Exec(ctx, putConversationJobQuery, jq.BridgeID, loginID, conversationID, now.UnixMilli())
+	var createdTS int64
+	err = jq.GetDB().QueryRow(ctx, putConversationJobQuery, jq.BridgeID, loginID, conversationID, now.UnixMilli()).
+		Scan(&revision, &createdTS)
+	return revision, timeFromMillis(createdTS), err
 }
 
 // PutLiveConversation records direct evidence that the conversation exists.
