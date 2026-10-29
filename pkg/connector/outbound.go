@@ -513,13 +513,27 @@ func (tc *TumblrClient) processNextDueOutboundSend(ctx context.Context) (*tumblr
 	if err != nil {
 		return nil, err
 	}
-	defer releaseSubmission()
+	defer func() { releaseSubmission() }()
 
 	send, needsSync, err := tc.prepareNextDueOutboundSend(lockCtx)
 	if err != nil || send == nil || !needsSync {
 		return send, err
 	}
-	syncErr := tc.syncConversationByIDWithSubmissionLock(lockCtx, send.ConversationID, 0)
+	delivery, syncErr := tc.syncConversationByIDWithSubmissionLock(lockCtx, send.ConversationID, 0)
+	if syncErr == nil && delivery != nil {
+		releaseSubmission()
+		releaseSubmission = func() {}
+		syncErr = tc.deliverConversation(ctx, delivery)
+		var lockErr error
+		lockCtx, releaseSubmission, lockErr = tc.acquireOutboundSubmissionLock(ctx)
+		if lockErr != nil {
+			releaseSubmission = func() {}
+			return send, errors.Join(syncErr, lockErr)
+		}
+		if syncErr == nil {
+			syncErr = tc.commitConversationDeliveryWithSubmissionLock(lockCtx, delivery)
+		}
+	}
 	if syncErr != nil {
 		if log := tc.log(); log != nil {
 			log.Warn().Err(syncErr).Msg("Could not reconcile a pending Tumblr outbound message")
