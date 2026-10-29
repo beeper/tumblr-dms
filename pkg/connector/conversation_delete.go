@@ -98,7 +98,7 @@ func (tc *TumblrClient) handleRemoteConversationDelete(
 		return errTumblrConversationJobSuperseded
 	}
 	if job.DeleteRoomID == "" {
-		listed, listErr := tc.conversationStillListed(ctx, client, meta.SelectedBlogUUID, conversationID)
+		listed, listErr := tc.conversationStillListed(ctx, client, meta.SelectedBlogUUID, conversationID, job.UpdatedAt)
 		if listErr != nil {
 			return fmt.Errorf("failed to check Tumblr conversation list before deletion: %w", listErr)
 		}
@@ -186,10 +186,12 @@ func (tc *TumblrClient) conversationStillListed(
 	client *tumblr.Client,
 	selectedBlogUUID string,
 	conversationID string,
+	jobUpdatedAt time.Time,
 ) (bool, error) {
-	if listed, ok := tc.recentListedConversation(conversationID); ok {
+	if listed, ok := tc.recentListedConversation(conversationID, jobUpdatedAt); ok {
 		return listed, nil
 	}
+	walkStartedAt := time.Now()
 	limit := tc.connector.Config.ConversationSyncBatchLimit()
 	before := ""
 	seenCursors := make(map[string]struct{})
@@ -216,7 +218,7 @@ func (tc *TumblrClient) conversationStillListed(
 		}
 		nextBefore = strings.TrimSpace(nextBefore)
 		if nextBefore == "" {
-			tc.rememberListedConversations(remoteConversationIDs)
+			tc.rememberListedConversations(remoteConversationIDs, walkStartedAt)
 			return false, nil
 		}
 		if _, duplicate := seenCursors[nextBefore]; duplicate {
@@ -228,21 +230,23 @@ func (tc *TumblrClient) conversationStillListed(
 	return false, fmt.Errorf("tumblr conversation list exceeded %d pages", maxConversationListPages)
 }
 
-func (tc *TumblrClient) rememberListedConversations(conversationIDs map[string]struct{}) {
+func (tc *TumblrClient) rememberListedConversations(conversationIDs map[string]struct{}, walkStartedAt time.Time) {
 	tc.listedConversationsLock.Lock()
 	defer tc.listedConversationsLock.Unlock()
 	tc.listedConversations = maps.Clone(conversationIDs)
-	tc.listedConversationsAt = time.Now()
+	tc.listedConversationsAt = walkStartedAt
 }
 
-func (tc *TumblrClient) recentListedConversation(conversationID string) (listed, ok bool) {
+func (tc *TumblrClient) recentListedConversation(conversationID string, notBefore time.Time) (listed, ok bool) {
 	tc.listedConversationsLock.Lock()
 	defer tc.listedConversationsLock.Unlock()
 	if tc.listedConversations == nil || time.Since(tc.listedConversationsAt) > tumblrDeletionReconciliationInterval {
 		return false, false
 	}
-	_, listed = tc.listedConversations[conversationID]
-	return listed, true
+	if _, listed = tc.listedConversations[conversationID]; listed {
+		return true, true
+	}
+	return false, tc.listedConversationsAt.After(notBefore)
 }
 
 func (tc *TumblrClient) deletedConversationRoomID(

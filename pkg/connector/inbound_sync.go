@@ -504,6 +504,7 @@ func (tc *TumblrClient) reconcileConversationDeletions(ctx context.Context) erro
 		return err
 	}
 
+	walkStartedAt := time.Now()
 	limit := tc.connector.Config.ConversationSyncBatchLimit()
 	before := ""
 	seenCursors := make(map[string]struct{})
@@ -527,7 +528,7 @@ func (tc *TumblrClient) reconcileConversationDeletions(ctx context.Context) erro
 		}
 		nextBefore = strings.TrimSpace(nextBefore)
 		if nextBefore == "" {
-			tc.rememberListedConversations(remoteConversationIDs)
+			tc.rememberListedConversations(remoteConversationIDs, walkStartedAt)
 			return tc.enqueueMissingConversationChecks(ctx, remoteConversationIDs)
 		}
 		if _, duplicate := seenCursors[nextBefore]; duplicate {
