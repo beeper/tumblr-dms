@@ -73,9 +73,14 @@ func (tc *TumblrConnector) GetCapabilities() *bridgev2.NetworkGeneralCapabilitie
 }
 
 func (tc *TumblrConnector) GetBridgeInfoVersion() (info, capabilities int) {
-	return 2, 8
+	return 2, 9
 }
 
-func (tc *TumblrClient) GetCapabilities(context.Context, *bridgev2.Portal) *event.RoomFeatures {
-	return roomCaps.Clone()
+func (tc *TumblrClient) GetCapabilities(_ context.Context, portal *bridgev2.Portal) *event.RoomFeatures {
+	caps := roomCaps.Clone()
+	if _, _, err := tc.blockTarget(portal); err == nil {
+		caps.BlockUser = true
+		caps.ID += "+blocks"
+	}
+	return caps
 }
