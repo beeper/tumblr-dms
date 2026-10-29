@@ -72,8 +72,7 @@ type TumblrClient struct {
 	listedConversationsLock sync.Mutex
 	listedConversations     map[string]struct{}
 	listedConversationsAt   time.Time
-	listedMissingQueueFrom  time.Time
-	listedMissingQueuedAt   time.Time
+	listedMissingQueued     map[string]queuedMissingConversation
 }
 
 var _ bridgev2.NetworkAPI = (*TumblrClient)(nil)

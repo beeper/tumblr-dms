@@ -529,12 +529,7 @@ func (tc *TumblrClient) reconcileConversationDeletions(ctx context.Context) erro
 		nextBefore = strings.TrimSpace(nextBefore)
 		if nextBefore == "" {
 			tc.rememberListedConversations(remoteConversationIDs, walkStartedAt)
-			queueStartedAt := time.Now()
-			if err := tc.enqueueMissingConversationChecks(ctx, remoteConversationIDs); err != nil {
-				return err
-			}
-			tc.markListedConversationMissesQueued(walkStartedAt, queueStartedAt)
-			return nil
+			return tc.enqueueMissingConversationChecks(ctx, remoteConversationIDs, walkStartedAt)
 		}
 		if _, duplicate := seenCursors[nextBefore]; duplicate {
 			return fmt.Errorf("tumblr conversation deletion reconciliation cursor repeated")
@@ -545,12 +540,19 @@ func (tc *TumblrClient) reconcileConversationDeletions(ctx context.Context) erro
 	return fmt.Errorf("tumblr conversation deletion reconciliation exceeded %d pages", maxConversationListPages)
 }
 
-func (tc *TumblrClient) enqueueMissingConversationChecks(ctx context.Context, remoteConversationIDs map[string]struct{}) error {
+func (tc *TumblrClient) enqueueMissingConversationChecks(
+	ctx context.Context,
+	remoteConversationIDs map[string]struct{},
+	walkStartedAt time.Time,
+) error {
 	userPortals, err := tc.connector.Bridge.DB.UserPortal.GetAllForLogin(ctx, tc.userLogin.UserLogin)
 	if err != nil {
 		return fmt.Errorf("failed to load Tumblr portals for deletion reconciliation: %w", err)
 	}
-	queued := 0
+	queued := make(map[string]queuedMissingConversation)
+	defer func() {
+		tc.rememberQueuedMissingConversations(walkStartedAt, queued)
+	}()
 	for _, userPortal := range userPortals {
 		if userPortal == nil {
 			continue
@@ -567,15 +569,16 @@ func (tc *TumblrClient) enqueueMissingConversationChecks(ctx context.Context, re
 		}
 		// List absence only selects a candidate. The durable job must confirm a
 		// direct 404 before it can remove the local room.
-		if err = tc.connector.DB.Jobs.Put(ctx, tc.userLogin.ID, conversationID); err != nil {
-			return fmt.Errorf("failed to persist Tumblr deletion verification job: %w", err)
+		revision, createdAt, putErr := tc.connector.DB.Jobs.Put(ctx, tc.userLogin.ID, conversationID)
+		if putErr != nil {
+			return fmt.Errorf("failed to persist Tumblr deletion verification job: %w", putErr)
 		}
-		queued++
+		queued[conversationID] = queuedMissingConversation{revision: revision, createdAt: createdAt}
 	}
-	if queued > 0 {
+	if len(queued) > 0 {
 		tc.wakeInboundSync()
 		if log := tc.log(); log != nil {
-			log.Info().Int("conversation_count", queued).
+			log.Info().Int("conversation_count", len(queued)).
 				Msg("Queued Tumblr conversations missing from the complete list for direct verification")
 		}
 	}
