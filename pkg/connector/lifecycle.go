@@ -158,7 +158,9 @@ func (tc *TumblrClient) failGeneration(generation *connectionGeneration, state s
 	if !isCurrent {
 		return
 	}
-	tc.setLoggedIn(false)
+	if state.StateEvent == status.StateBadCredentials {
+		tc.setLoggedIn(false)
+	}
 	generation.cancel()
 	tc.sendBridgeState(state)
 }

@@ -140,12 +140,11 @@ func (tc *TumblrClient) failConnect(state status.BridgeState) {
 	tc.generationLock.Lock()
 	generation := tc.generation
 	tc.generationLock.Unlock()
-	if generation != nil {
+	if tc.isCurrentGeneration(generation) {
 		tc.failGeneration(generation, state)
-		return
+	} else if tc.loggedIn.Swap(false) {
+		tc.sendBridgeState(state)
 	}
-	tc.setLoggedIn(false)
-	tc.sendBridgeState(state)
 }
 
 func (tc *TumblrClient) setLoggedIn(loggedIn bool) {
@@ -389,7 +388,7 @@ func (tc *TumblrClient) Connect(_ context.Context) {
 		generation.wg.Done()
 		return
 	}
-	tc.setLoggedIn(false)
+	tc.setLoggedIn(true)
 	tc.sendBridgeState(status.BridgeState{StateEvent: status.StateConnecting})
 	tc.pushRegistrationDown.Store(nil)
 	tc.remoteForbidden.Store(false)
@@ -473,7 +472,6 @@ func (tc *TumblrClient) runConnectionGeneration(generation *connectionGeneration
 	if !tc.isCurrentGeneration(generation) {
 		return
 	}
-	tc.setLoggedIn(true)
 	tc.loginMetadataLock.Lock()
 	liveMeta, metadataErr := tc.validatedLoginMetadataLocked()
 	if metadataErr == nil {
