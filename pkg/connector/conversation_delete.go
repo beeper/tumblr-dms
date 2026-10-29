@@ -96,6 +96,20 @@ func (tc *TumblrClient) handleRemoteConversationDelete(
 	if expectedRevision <= 0 || job == nil || job.Revision != expectedRevision {
 		return errTumblrConversationJobSuperseded
 	}
+	if job.DeleteRoomID == "" {
+		listed, listErr := tc.conversationStillListed(ctx, client, meta.SelectedBlogUUID, conversationID)
+		if listErr != nil {
+			return fmt.Errorf("failed to check Tumblr conversation list before deletion: %w", listErr)
+		}
+		if listed {
+			if log := tc.log(); log != nil {
+				log.Warn().Err(probeErr).
+					Str("conversation_id_hash", logIdentifierHash(conversationID)).
+					Msg("Tumblr still lists a conversation whose history returned not found, keeping its room")
+			}
+			return nil
+		}
+	}
 	if err := tc.terminalizeOutboundConversation(ctx, conversationID); err != nil {
 		return fmt.Errorf("failed to cancel outbound sends for deleted Tumblr conversation: %w", err)
 	}
@@ -164,6 +178,45 @@ func (tc *TumblrClient) handleRemoteConversationDelete(
 			Msg("Removed Tumblr conversation after direct deletion confirmation")
 	}
 	return nil
+}
+
+func (tc *TumblrClient) conversationStillListed(
+	ctx context.Context,
+	client *tumblr.Client,
+	selectedBlogUUID string,
+	conversationID string,
+) (bool, error) {
+	limit := tc.connector.Config.ConversationSyncBatchLimit()
+	before := ""
+	seenCursors := make(map[string]struct{})
+	for page := 0; page < maxConversationListPages; page++ {
+		resp, err := client.ListConversationsBefore(ctx, selectedBlogUUID, limit, before)
+		if err != nil {
+			return false, tc.handleRemoteError(err)
+		}
+		if resp == nil {
+			return false, fmt.Errorf("tumblr conversation list response is missing")
+		}
+		for _, conversation := range resp.Conversations {
+			if conversation.ID == conversationID {
+				return true, nil
+			}
+		}
+		nextBefore, err := resp.NextBefore()
+		if err != nil {
+			return false, err
+		}
+		nextBefore = strings.TrimSpace(nextBefore)
+		if nextBefore == "" {
+			return false, nil
+		}
+		if _, duplicate := seenCursors[nextBefore]; duplicate {
+			return false, fmt.Errorf("tumblr conversation list cursor repeated")
+		}
+		seenCursors[nextBefore] = struct{}{}
+		before = nextBefore
+	}
+	return false, fmt.Errorf("tumblr conversation list exceeded %d pages", maxConversationListPages)
 }
 
 func (tc *TumblrClient) deletedConversationRoomID(
