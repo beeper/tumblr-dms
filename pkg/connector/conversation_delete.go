@@ -235,6 +235,17 @@ func (tc *TumblrClient) rememberListedConversations(conversationIDs map[string]s
 	defer tc.listedConversationsLock.Unlock()
 	tc.listedConversations = maps.Clone(conversationIDs)
 	tc.listedConversationsAt = walkStartedAt
+	tc.listedMissingQueueFrom = time.Time{}
+	tc.listedMissingQueuedAt = time.Time{}
+}
+
+func (tc *TumblrClient) markListedConversationMissesQueued(walkStartedAt, queueStartedAt time.Time) {
+	tc.listedConversationsLock.Lock()
+	defer tc.listedConversationsLock.Unlock()
+	if tc.listedConversationsAt.Equal(walkStartedAt) {
+		tc.listedMissingQueueFrom = queueStartedAt.Truncate(time.Millisecond)
+		tc.listedMissingQueuedAt = time.Now()
+	}
 }
 
 func (tc *TumblrClient) recentListedConversation(conversationID string, notBefore time.Time) (listed, ok bool) {
@@ -246,7 +257,9 @@ func (tc *TumblrClient) recentListedConversation(conversationID string, notBefor
 	if _, listed = tc.listedConversations[conversationID]; listed {
 		return true, true
 	}
-	return false, tc.listedConversationsAt.After(notBefore)
+	queuedFromSnapshot := !tc.listedMissingQueuedAt.IsZero() &&
+		!notBefore.Before(tc.listedMissingQueueFrom) && !notBefore.After(tc.listedMissingQueuedAt)
+	return false, tc.listedConversationsAt.After(notBefore) || queuedFromSnapshot
 }
 
 func (tc *TumblrClient) deletedConversationRoomID(

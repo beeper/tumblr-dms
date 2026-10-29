@@ -529,7 +529,12 @@ func (tc *TumblrClient) reconcileConversationDeletions(ctx context.Context) erro
 		nextBefore = strings.TrimSpace(nextBefore)
 		if nextBefore == "" {
 			tc.rememberListedConversations(remoteConversationIDs, walkStartedAt)
-			return tc.enqueueMissingConversationChecks(ctx, remoteConversationIDs)
+			queueStartedAt := time.Now()
+			if err := tc.enqueueMissingConversationChecks(ctx, remoteConversationIDs); err != nil {
+				return err
+			}
+			tc.markListedConversationMissesQueued(walkStartedAt, queueStartedAt)
+			return nil
 		}
 		if _, duplicate := seenCursors[nextBefore]; duplicate {
 			return fmt.Errorf("tumblr conversation deletion reconciliation cursor repeated")
