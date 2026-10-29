@@ -530,6 +530,9 @@ func (tc *TumblrClient) processNextDueOutboundSend(ctx context.Context) (*tumblr
 			releaseSubmission = func() {}
 			return send, errors.Join(syncErr, lockErr)
 		}
+		if syncErr == nil {
+			syncErr = tc.commitConversationDeliveryWithSubmissionLock(lockCtx, delivery)
+		}
 	}
 	if syncErr != nil {
 		if log := tc.log(); log != nil {

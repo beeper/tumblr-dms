@@ -384,6 +384,9 @@ func (tc *TumblrClient) processSelectedConversationJob(
 				releaseSubmission = func() {}
 				return errors.Join(err, lockErr)
 			}
+			if err == nil {
+				err = tc.commitConversationDeliveryWithSubmissionLock(lockCtx, delivery)
+			}
 		}
 	}
 	if errors.Is(err, errTumblrConversationJobSuperseded) {

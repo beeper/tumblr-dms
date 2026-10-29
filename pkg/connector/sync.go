@@ -307,18 +307,42 @@ func (tc *TumblrClient) deliverConversation(ctx context.Context, delivery *conve
 		// durable head unchanged so this fetch is retried without losing them.
 		return &outboundReconciliationDeferredError{messageCount: delivery.heldMessageCount}
 	}
+	return nil
+}
+
+func (tc *TumblrClient) commitConversationDeliveryWithSubmissionLock(ctx context.Context, delivery *conversationDelivery) error {
+	if delivery == nil {
+		return nil
+	}
+	if tc == nil || tc.connector == nil || tc.connector.DB == nil || tc.connector.Bridge == nil ||
+		tc.connector.Bridge.DB == nil || tc.userLogin == nil {
+		return fmt.Errorf("tumblr durable sync database is unavailable")
+	}
+	tc.syncLock.Lock()
+	defer tc.syncLock.Unlock()
+	job, err := tc.connector.DB.Jobs.Get(ctx, tc.userLogin.ID, delivery.conversation.ID)
+	if err != nil {
+		return fmt.Errorf("failed to reload Tumblr conversation sync job: %w", err)
+	}
+	if job != nil && job.DeleteRoomID != "" {
+		return errTumblrConversationJobSuperseded
+	}
+	portal, err := tc.connector.Bridge.DB.Portal.GetByKey(ctx, delivery.portalKey)
+	if err != nil {
+		return fmt.Errorf("failed to load Tumblr portal before saving sync boundary: %w", err)
+	}
+	if portal == nil {
+		return errTumblrConversationJobSuperseded
+	}
 	if delivery.fetchedHeadMessageID == "" {
 		return nil
 	}
 	if !validRemoteID(delivery.fetchedHeadMessageID) {
 		return fmt.Errorf("tumblr conversation sync boundary is invalid")
 	}
-	if tc == nil || tc.connector == nil || tc.connector.DB == nil || tc.userLogin == nil {
-		return fmt.Errorf("tumblr durable sync database is unavailable")
-	}
 	// Keep this as the final durable write: retries may repeat work, but they
 	// can never skip over a fetched message that was not confirmed in Matrix.
-	if err := tc.connector.DB.ConversationSync.SetCompletedHead(
+	if err = tc.connector.DB.ConversationSync.SetCompletedHead(
 		ctx,
 		tc.userLogin.ID,
 		delivery.conversation.ID,
