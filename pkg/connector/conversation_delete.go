@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -186,9 +187,13 @@ func (tc *TumblrClient) conversationStillListed(
 	selectedBlogUUID string,
 	conversationID string,
 ) (bool, error) {
+	if listed, ok := tc.recentListedConversation(conversationID); ok {
+		return listed, nil
+	}
 	limit := tc.connector.Config.ConversationSyncBatchLimit()
 	before := ""
 	seenCursors := make(map[string]struct{})
+	remoteConversationIDs := make(map[string]struct{})
 	for page := 0; page < maxConversationListPages; page++ {
 		resp, err := client.ListConversationsBefore(ctx, selectedBlogUUID, limit, before)
 		if err != nil {
@@ -201,6 +206,9 @@ func (tc *TumblrClient) conversationStillListed(
 			if conversation.ID == conversationID {
 				return true, nil
 			}
+			if validRemoteID(conversation.ID) {
+				remoteConversationIDs[conversation.ID] = struct{}{}
+			}
 		}
 		nextBefore, err := resp.NextBefore()
 		if err != nil {
@@ -208,6 +216,7 @@ func (tc *TumblrClient) conversationStillListed(
 		}
 		nextBefore = strings.TrimSpace(nextBefore)
 		if nextBefore == "" {
+			tc.rememberListedConversations(remoteConversationIDs)
 			return false, nil
 		}
 		if _, duplicate := seenCursors[nextBefore]; duplicate {
@@ -217,6 +226,23 @@ func (tc *TumblrClient) conversationStillListed(
 		before = nextBefore
 	}
 	return false, fmt.Errorf("tumblr conversation list exceeded %d pages", maxConversationListPages)
+}
+
+func (tc *TumblrClient) rememberListedConversations(conversationIDs map[string]struct{}) {
+	tc.listedConversationsLock.Lock()
+	defer tc.listedConversationsLock.Unlock()
+	tc.listedConversations = maps.Clone(conversationIDs)
+	tc.listedConversationsAt = time.Now()
+}
+
+func (tc *TumblrClient) recentListedConversation(conversationID string) (listed, ok bool) {
+	tc.listedConversationsLock.Lock()
+	defer tc.listedConversationsLock.Unlock()
+	if tc.listedConversations == nil || time.Since(tc.listedConversationsAt) > tumblrDeletionReconciliationInterval {
+		return false, false
+	}
+	_, listed = tc.listedConversations[conversationID]
+	return listed, true
 }
 
 func (tc *TumblrClient) deletedConversationRoomID(

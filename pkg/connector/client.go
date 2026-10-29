@@ -68,6 +68,10 @@ type TumblrClient struct {
 	bridgedReadTimestamps      map[string]int64
 	seenMessages               map[string]struct{}
 	seenMessageOrder           []string
+
+	listedConversationsLock sync.Mutex
+	listedConversations     map[string]struct{}
+	listedConversationsAt   time.Time
 }
 
 var _ bridgev2.NetworkAPI = (*TumblrClient)(nil)

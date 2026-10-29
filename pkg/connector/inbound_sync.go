@@ -527,6 +527,7 @@ func (tc *TumblrClient) reconcileConversationDeletions(ctx context.Context) erro
 		}
 		nextBefore = strings.TrimSpace(nextBefore)
 		if nextBefore == "" {
+			tc.rememberListedConversations(remoteConversationIDs)
 			return tc.enqueueMissingConversationChecks(ctx, remoteConversationIDs)
 		}
 		if _, duplicate := seenCursors[nextBefore]; duplicate {
