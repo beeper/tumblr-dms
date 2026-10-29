@@ -355,7 +355,7 @@ func (tc *TumblrClient) processSelectedConversationJob(
 	if err != nil {
 		return err
 	}
-	defer releaseSubmission()
+	defer func() { releaseSubmission() }()
 
 	// A second process may have selected the same row before this process won
 	// the submission fence. Only the exact still-due revision may be handled or
@@ -372,7 +372,19 @@ func (tc *TumblrClient) processSelectedConversationJob(
 	if job.DeleteRoomID != "" {
 		err = tc.resumeRemoteConversationDeleteWithSubmissionLock(lockCtx, job.ConversationID, job.Revision)
 	} else {
-		err = tc.syncConversationByIDWithSubmissionLock(lockCtx, job.ConversationID, job.Revision)
+		var delivery *conversationDelivery
+		delivery, err = tc.syncConversationByIDWithSubmissionLock(lockCtx, job.ConversationID, job.Revision)
+		if err == nil && delivery != nil {
+			releaseSubmission()
+			releaseSubmission = func() {}
+			err = tc.deliverConversation(ctx, delivery)
+			var lockErr error
+			lockCtx, releaseSubmission, lockErr = tc.acquireOutboundSubmissionLock(ctx)
+			if lockErr != nil {
+				releaseSubmission = func() {}
+				return errors.Join(err, lockErr)
+			}
+		}
 	}
 	if errors.Is(err, errTumblrConversationJobSuperseded) {
 		tc.wakeInboundSync()

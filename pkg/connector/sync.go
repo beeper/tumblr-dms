@@ -42,40 +42,41 @@ func validRemoteID(id string) bool {
 }
 
 // syncConversationByIDWithSubmissionLock requires the caller to hold this
-// login's submission fence before taking syncLock.
+// login's submission fence before taking syncLock. The caller must release the
+// fence before passing the returned delivery to deliverConversation.
 func (tc *TumblrClient) syncConversationByIDWithSubmissionLock(
 	ctx context.Context,
 	conversationID string,
 	expectedRevision int64,
-) error {
+) (*conversationDelivery, error) {
 	if !validRemoteID(conversationID) {
-		return fmt.Errorf("tumblr conversation ID is invalid")
+		return nil, fmt.Errorf("tumblr conversation ID is invalid")
 	}
 	tc.syncLock.Lock()
 	defer tc.syncLock.Unlock()
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	job, err := tc.connector.DB.Jobs.Get(ctx, tc.userLogin.ID, conversationID)
 	if err != nil {
-		return fmt.Errorf("failed to reload Tumblr conversation sync job: %w", err)
+		return nil, fmt.Errorf("failed to reload Tumblr conversation sync job: %w", err)
 	}
 	if expectedRevision > 0 && (job == nil || job.Revision != expectedRevision || job.NextAttemptAt.After(time.Now())) {
-		return errTumblrConversationJobSuperseded
+		return nil, errTumblrConversationJobSuperseded
 	}
 	if job != nil && job.DeleteRoomID != "" {
 		if job.NextAttemptAt.After(time.Now()) {
-			return errTumblrConversationJobSuperseded
+			return nil, errTumblrConversationJobSuperseded
 		}
-		return tc.handleRemoteConversationDelete(ctx, conversationID, job.Revision)
+		return nil, tc.handleRemoteConversationDelete(ctx, conversationID, job.Revision)
 	}
 
 	if err := tc.requireLoggedInForContext(ctx); err != nil {
-		return err
+		return nil, err
 	}
 	meta, err := tc.validatedLoginMetadata()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	limit := defaultConversationSyncLimit
 	if tc.connector != nil {
@@ -83,7 +84,7 @@ func (tc *TumblrClient) syncConversationByIDWithSubmissionLock(
 	}
 	client, err := tc.tumblrClient()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	conversation, fetchedHeadMessageID, err := tc.fetchConversationForSync(
 		ctx,
@@ -96,25 +97,25 @@ func (tc *TumblrClient) syncConversationByIDWithSubmissionLock(
 		if tumblr.IsNotFound(err) {
 			if job == nil {
 				if expectedRevision > 0 {
-					return errTumblrConversationJobSuperseded
+					return nil, errTumblrConversationJobSuperseded
 				}
 				if ensureErr := tc.connector.DB.Jobs.Ensure(ctx, tc.userLogin.ID, conversationID); ensureErr != nil {
-					return fmt.Errorf("failed to persist missing Tumblr conversation cleanup: %w", ensureErr)
+					return nil, fmt.Errorf("failed to persist missing Tumblr conversation cleanup: %w", ensureErr)
 				}
 				job, err = tc.connector.DB.Jobs.Get(ctx, tc.userLogin.ID, conversationID)
 				if err != nil {
-					return fmt.Errorf("failed to reload missing Tumblr conversation cleanup: %w", err)
+					return nil, fmt.Errorf("failed to reload missing Tumblr conversation cleanup: %w", err)
 				}
 				if job == nil {
-					return fmt.Errorf("missing Tumblr conversation cleanup was not persisted")
+					return nil, fmt.Errorf("missing Tumblr conversation cleanup was not persisted")
 				}
 			}
-			return tc.handleRemoteConversationDelete(ctx, conversationID, job.Revision)
+			return nil, tc.handleRemoteConversationDelete(ctx, conversationID, job.Revision)
 		}
 		if tumblr.IsAuthError(err) {
-			return tc.handleRemoteError(err)
+			return nil, tc.handleRemoteError(err)
 		}
-		return err
+		return nil, err
 	}
 	if log := tc.log(); log != nil {
 		log.Info().
@@ -122,7 +123,7 @@ func (tc *TumblrClient) syncConversationByIDWithSubmissionLock(
 			Int("message_count", len(conversation.Messages.Data)).
 			Msg("Fetched pushed Tumblr conversation")
 	}
-	return tc.queueFetchedConversation(ctx, conversation, fetchedHeadMessageID)
+	return tc.prepareConversationDelivery(ctx, conversation, true, fetchedHeadMessageID)
 }
 
 func (tc *TumblrClient) fetchConversationForSync(
@@ -273,24 +274,43 @@ func (err *outboundReconciliationDeferredError) Error() string {
 	return fmt.Sprintf("%d Tumblr message(s) held for safe outbound reconciliation", err.messageCount)
 }
 
-func (tc *TumblrClient) queueFetchedConversation(
-	ctx context.Context,
-	conversation tumblr.Conversation,
-	fetchedHeadMessageID string,
-) error {
-	heldMessageIDs, err := tc.queueConversation(ctx, conversation, true)
-	if err != nil {
-		return err
-	}
-	if len(heldMessageIDs) > 0 {
-		// Held messages were deliberately not handed to bridgev2. Keep the
-		// durable head unchanged so this fetch is retried without losing them.
-		return &outboundReconciliationDeferredError{messageCount: len(heldMessageIDs)}
-	}
-	if fetchedHeadMessageID == "" {
+type conversationDelivery struct {
+	conversation         tumblr.Conversation
+	portalKey            networkid.PortalKey
+	messages             []tumblr.Message
+	readReceipt          *simplevent.Receipt
+	fallbackTimestamp    time.Time
+	transactions         map[string]networkid.TransactionID
+	heldMessageCount     int
+	fetchedHeadMessageID string
+}
+
+func (tc *TumblrClient) deliverConversation(ctx context.Context, delivery *conversationDelivery) error {
+	if delivery == nil {
 		return nil
 	}
-	if !validRemoteID(fetchedHeadMessageID) {
+	if err := tc.queueConversationMessageChain(
+		ctx,
+		delivery.portalKey,
+		delivery.messages,
+		delivery.readReceipt,
+		delivery.fallbackTimestamp,
+		delivery.transactions,
+	); err != nil {
+		return err
+	}
+	if delivery.readReceipt != nil {
+		tc.markReadReceiptBridged(delivery.conversation)
+	}
+	if delivery.heldMessageCount > 0 {
+		// Held messages were deliberately not handed to bridgev2. Keep the
+		// durable head unchanged so this fetch is retried without losing them.
+		return &outboundReconciliationDeferredError{messageCount: delivery.heldMessageCount}
+	}
+	if delivery.fetchedHeadMessageID == "" {
+		return nil
+	}
+	if !validRemoteID(delivery.fetchedHeadMessageID) {
 		return fmt.Errorf("tumblr conversation sync boundary is invalid")
 	}
 	if tc == nil || tc.connector == nil || tc.connector.DB == nil || tc.userLogin == nil {
@@ -301,8 +321,8 @@ func (tc *TumblrClient) queueFetchedConversation(
 	if err := tc.connector.DB.ConversationSync.SetCompletedHead(
 		ctx,
 		tc.userLogin.ID,
-		conversation.ID,
-		fetchedHeadMessageID,
+		delivery.conversation.ID,
+		delivery.fetchedHeadMessageID,
 		time.Now(),
 	); err != nil {
 		return fmt.Errorf("failed to save Tumblr conversation sync boundary: %w", err)
@@ -342,11 +362,12 @@ func mergeConversationHistoryForSync(listConversation tumblr.Conversation, histo
 	return merged
 }
 
-func (tc *TumblrClient) queueConversation(
+func (tc *TumblrClient) prepareConversationDelivery(
 	ctx context.Context,
 	conversation tumblr.Conversation,
 	forceChatResync bool,
-) (map[string]struct{}, error) {
+	fetchedHeadMessageID string,
+) (*conversationDelivery, error) {
 	if !validRemoteID(conversation.ID) {
 		return nil, fmt.Errorf("tumblr conversation ID is invalid")
 	}
@@ -374,20 +395,16 @@ func (tc *TumblrClient) queueConversation(
 	); err != nil {
 		return nil, err
 	}
-	if err = tc.queueConversationMessageChain(
-		ctx,
-		portalKey,
-		messages,
-		readReceipt,
-		fallbackTimestamp,
-		reconciliation.transactions,
-	); err != nil {
-		return nil, err
-	}
-	if readReceipt != nil {
-		tc.markReadReceiptBridged(conversation)
-	}
-	return reconciliation.heldMessageIDs, nil
+	return &conversationDelivery{
+		conversation:         conversation,
+		portalKey:            portalKey,
+		messages:             messages,
+		readReceipt:          readReceipt,
+		fallbackTimestamp:    fallbackTimestamp,
+		transactions:         reconciliation.transactions,
+		heldMessageCount:     len(reconciliation.heldMessageIDs),
+		fetchedHeadMessageID: fetchedHeadMessageID,
+	}, nil
 }
 
 func (tc *TumblrClient) ensureConversationPortalForSync(
