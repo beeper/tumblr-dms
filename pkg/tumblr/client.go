@@ -37,7 +37,7 @@ const (
 
 	blogFields             = "?avatar,name,?title,url,?blog_view_url,?can_message,?description,?is_adult,?uuid,?is_private_channel,?posts,?is_group_channel,?primary,?admin,?drafts,?followers,?queue,?has_flagged_posts,?messages,?ask,?can_submit,?mention_key,?timezone_offset,?analytics_url,?is_premium_partner,?is_blogless_advertiser,?is_tumblrpay_onboarded,?theme,?tumblrmart_orders"
 	conversationBlogFields = "?avatar,name,?seconds_since_last_activity,url,?blog_view_url,?uuid,?theme,?description_npf,?is_adult,?primary"
-	suggestionBlogFields   = "avatar,title,name,theme,url,blogViewUrl,isAdult,uuid"
+	suggestionBlogFields   = "?avatar,?title,name,?theme,url,?blog_view_url,?is_adult,?uuid"
 )
 
 var (
