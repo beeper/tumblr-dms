@@ -522,6 +522,10 @@ func (tc *TumblrClient) refreshRenamedSelectedBlog(ctx context.Context, client *
 	if blog.Name == meta.SelectedBlogName {
 		return false, nil
 	}
+	if !tc.beginOwnedOperation() {
+		return false, errTumblrClientRetired
+	}
+	defer tc.endOwnedOperation()
 	if err = tc.applySelectedBlog(userInfo, blog); err != nil {
 		return false, err
 	}
