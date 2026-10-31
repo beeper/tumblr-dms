@@ -104,6 +104,22 @@ func (tc *TumblrClient) handleRemoteConversationDelete(
 			return fmt.Errorf("failed to check Tumblr conversation list before deletion: %w", listErr)
 		}
 		if listed {
+			renamed, renameErr := tc.refreshRenamedSelectedBlog(ctx, client)
+			if renameErr != nil {
+				return fmt.Errorf("failed to check Tumblr blog name after a listed conversation returned not found: %w", renameErr)
+			}
+			if renamed {
+				if log := tc.log(); log != nil {
+					log.Info().
+						Str("conversation_id_hash", logIdentifierHash(conversationID)).
+						Msg("Tumblr blog was renamed, retrying conversation sync with the new name")
+				}
+				if err = tc.connector.DB.Jobs.PutLiveConversation(ctx, tc.userLogin.ID, conversationID); err != nil {
+					return fmt.Errorf("failed to requeue Tumblr conversation after blog rename: %w", err)
+				}
+				tc.wakeInboundSync()
+				return nil
+			}
 			if log := tc.log(); log != nil {
 				log.Warn().Err(probeErr).
 					Str("conversation_id_hash", logIdentifierHash(conversationID)).
