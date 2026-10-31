@@ -472,22 +472,7 @@ func (tc *TumblrClient) runConnectionGeneration(generation *connectionGeneration
 	if !tc.isCurrentGeneration(generation) {
 		return
 	}
-	tc.loginMetadataLock.Lock()
-	liveMeta, metadataErr := tc.validatedLoginMetadataLocked()
-	if metadataErr == nil {
-		liveMeta.UserName = userName(userInfo, blog)
-		liveMeta.SelectedBlogName = blog.Name
-		liveMeta.SelectedBlogUUID = blog.UUID
-	}
-	if metadataErr == nil && tc.userLogin != nil && tc.userLogin.UserLogin != nil {
-		tc.userLogin.RemoteName = blog.Name
-		tc.userLogin.RemoteProfile = status.RemoteProfile{
-			Username: blog.Name,
-			Name:     displayName(tc.connector, blog),
-		}
-	}
-	tc.loginMetadataLock.Unlock()
-	if metadataErr != nil {
+	if metadataErr := tc.applySelectedBlog(userInfo, blog); metadataErr != nil {
 		tc.failGeneration(generation, tumblrBadCredentialsStateWithCode("tumblr-invalid-login-metadata", metadataErr))
 		return
 	}
@@ -499,6 +484,51 @@ func (tc *TumblrClient) runConnectionGeneration(generation *connectionGeneration
 	tc.ensureInboundSyncStarted(generation)
 	tc.startPushSupervisor(generation)
 	tc.startOutboundSync(generation)
+}
+
+func (tc *TumblrClient) applySelectedBlog(userInfo *tumblr.UserInfoResponse, blog *tumblr.Blog) error {
+	tc.loginMetadataLock.Lock()
+	defer tc.loginMetadataLock.Unlock()
+	liveMeta, err := tc.validatedLoginMetadataLocked()
+	if err != nil {
+		return err
+	}
+	liveMeta.UserName = userName(userInfo, blog)
+	liveMeta.SelectedBlogName = blog.Name
+	liveMeta.SelectedBlogUUID = blog.UUID
+	if tc.userLogin != nil && tc.userLogin.UserLogin != nil {
+		tc.userLogin.RemoteName = blog.Name
+		tc.userLogin.RemoteProfile = status.RemoteProfile{
+			Username: blog.Name,
+			Name:     displayName(tc.connector, blog),
+		}
+	}
+	return nil
+}
+
+func (tc *TumblrClient) refreshRenamedSelectedBlog(ctx context.Context, client *tumblr.Client) (bool, error) {
+	userInfo, err := client.CurrentUser(ctx)
+	if err != nil {
+		return false, tc.handleRemoteError(err)
+	}
+	meta, err := tc.validatedLoginMetadata()
+	if err != nil {
+		return false, err
+	}
+	blog, err := selectedBlogFromCurrentUser(userInfo, meta)
+	if err != nil {
+		return false, err
+	}
+	if blog.Name == meta.SelectedBlogName {
+		return false, nil
+	}
+	if err = tc.applySelectedBlog(userInfo, blog); err != nil {
+		return false, err
+	}
+	if err = tc.saveOwnedUserLogin(ctx); err != nil {
+		return true, fmt.Errorf("failed to save renamed Tumblr blog: %w", err)
+	}
+	return true, nil
 }
 
 // connectFailureState returns the state for a failed connection attempt and
