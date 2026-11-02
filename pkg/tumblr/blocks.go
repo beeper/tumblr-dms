@@ -48,12 +48,16 @@ func (c *Client) ListBlockedBlogs(ctx context.Context, owner string) ([]Blog, er
 		if page.Blogs == nil {
 			return nil, fmt.Errorf("invalid Tumblr block list")
 		}
+		previousCount := len(blogs)
 		for _, blog := range *page.Blogs {
 			if !IsBlogUUID(blog.UUID) || blog.UUID == owner || seenIDs[blog.UUID] {
 				continue
 			}
 			seenIDs[blog.UUID] = true
 			blogs = append(blogs, blog)
+		}
+		if len(*page.Blogs) >= 20 && len(blogs) == previousCount {
+			return nil, fmt.Errorf("Tumblr block list pagination made no progress")
 		}
 		links := page.Links
 		if links == nil {
