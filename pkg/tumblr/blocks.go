@@ -57,7 +57,7 @@ func (c *Client) ListBlockedBlogs(ctx context.Context, owner string) ([]Blog, er
 			blogs = append(blogs, blog)
 		}
 		if len(*page.Blogs) >= 20 && len(blogs) == previousCount {
-			return nil, fmt.Errorf("Tumblr block list pagination made no progress")
+			return nil, fmt.Errorf("tumblr block list pagination made no progress")
 		}
 		links := page.Links
 		if links == nil {
