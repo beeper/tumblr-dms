@@ -147,6 +147,7 @@ func (tc *TumblrClient) fetchConversationForSync(
 	}
 	catchUpExistingPortal := portal != nil && portal.Portal != nil && portal.MXID != ""
 	previousCompletedHeadMessageID := ""
+	var previousCompletedAt time.Time
 	if catchUpExistingPortal {
 		state, stateErr := tc.connector.DB.ConversationSync.Get(ctx, tc.userLogin.ID, conversationID)
 		if stateErr != nil {
@@ -154,6 +155,7 @@ func (tc *TumblrClient) fetchConversationForSync(
 		}
 		if state != nil && validRemoteID(state.CompletedHeadMessageID) {
 			previousCompletedHeadMessageID = state.CompletedHeadMessageID
+			previousCompletedAt = state.UpdatedAt
 		}
 		// A portal can be created before its completed boundary is saved if the
 		// process stops mid-delivery. Scan to the end once to recover that work.
@@ -163,6 +165,7 @@ func (tc *TumblrClient) fetchConversationForSync(
 	messagePages := make([][]tumblr.Message, 0, 1)
 	var conversation tumblr.Conversation
 	fetchedHeadMessageID := ""
+	scan := newConversationHistoryScan(conversationID, previousCompletedHeadMessageID, previousCompletedAt)
 	for page := 0; page < maxConversationMessagePages; page++ {
 		resp, err := client.GetConversationBefore(ctx, selectedBlogName, conversationID, limit, before)
 		if err != nil {
@@ -184,6 +187,7 @@ func (tc *TumblrClient) fetchConversationForSync(
 			fetchedHeadMessageID = conversationPageHeadMessageID(pageMessages)
 		}
 		messagePages = append(messagePages, pageMessages)
+		scan.addPage(pageMessages)
 		if !catchUpExistingPortal {
 			conversation.Messages.Data = aggregateConversationMessagePages(messagePages)
 			return conversation, fetchedHeadMessageID, nil
@@ -202,12 +206,90 @@ func (tc *TumblrClient) fetchConversationForSync(
 			return conversation, fetchedHeadMessageID, nil
 		}
 		if _, duplicate := seenCursors[nextBefore]; duplicate {
+			tc.logUnfinishedConversationHistoryScan(scan, "cursor_repeated")
 			return tumblr.Conversation{}, "", fmt.Errorf("tumblr conversation history cursor repeated")
 		}
 		seenCursors[nextBefore] = struct{}{}
 		before = nextBefore
 	}
+	tc.logUnfinishedConversationHistoryScan(scan, "page_limit")
 	return tumblr.Conversation{}, "", fmt.Errorf("tumblr conversation history exceeded %d pages", maxConversationMessagePages)
+}
+
+type conversationHistoryScan struct {
+	conversationID     string
+	boundaryMessageID  string
+	boundarySavedAt    time.Time
+	startedAt          time.Time
+	pages              int
+	messages           int
+	emptyPages         int
+	trailingEmptyPages int
+	lastPageMessages   int
+	messageIDs         map[string]struct{}
+	oldestTimestamp    int64
+	newestTimestamp    int64
+}
+
+func newConversationHistoryScan(conversationID, boundaryMessageID string, boundarySavedAt time.Time) *conversationHistoryScan {
+	return &conversationHistoryScan{
+		conversationID:    conversationID,
+		boundaryMessageID: boundaryMessageID,
+		boundarySavedAt:   boundarySavedAt,
+		startedAt:         time.Now(),
+		messageIDs:        make(map[string]struct{}),
+	}
+}
+
+func (scan *conversationHistoryScan) addPage(messages []tumblr.Message) {
+	scan.pages++
+	scan.messages += len(messages)
+	scan.lastPageMessages = len(messages)
+	if len(messages) == 0 {
+		scan.emptyPages++
+		scan.trailingEmptyPages++
+		return
+	}
+	scan.trailingEmptyPages = 0
+	for _, message := range messages {
+		if validRemoteID(message.ID) {
+			scan.messageIDs[message.ID] = struct{}{}
+		}
+		if message.Timestamp <= 0 {
+			continue
+		}
+		if scan.oldestTimestamp == 0 || message.Timestamp < scan.oldestTimestamp {
+			scan.oldestTimestamp = message.Timestamp
+		}
+		if message.Timestamp > scan.newestTimestamp {
+			scan.newestTimestamp = message.Timestamp
+		}
+	}
+}
+
+func (tc *TumblrClient) logUnfinishedConversationHistoryScan(scan *conversationHistoryScan, reason string) {
+	log := tc.log()
+	if log == nil || scan == nil {
+		return
+	}
+	evt := log.Warn().
+		Str("conversation_id_hash", logIdentifierHash(scan.conversationID)).
+		Str("reason", reason).
+		Int("pages", scan.pages).
+		Int("messages", scan.messages).
+		Int("distinct_messages", len(scan.messageIDs)).
+		Int("empty_pages", scan.emptyPages).
+		Int("trailing_empty_pages", scan.trailingEmptyPages).
+		Int("last_page_messages", scan.lastPageMessages).
+		Int64("oldest_message_ts", scan.oldestTimestamp).
+		Int64("newest_message_ts", scan.newestTimestamp).
+		Bool("has_boundary", scan.boundaryMessageID != "").
+		Str("boundary_message_id_hash", logIdentifierHash(scan.boundaryMessageID)).
+		Dur("elapsed", time.Since(scan.startedAt))
+	if !scan.boundarySavedAt.IsZero() {
+		evt = evt.Time("boundary_saved_at", scan.boundarySavedAt)
+	}
+	evt.Msg("Tumblr conversation history scan stopped before reaching the sync boundary")
 }
 
 func conversationMessagesFromResponse(resp *tumblr.ConversationMessagesResponse) []tumblr.Message {
