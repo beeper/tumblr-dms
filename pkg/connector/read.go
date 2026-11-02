@@ -23,6 +23,7 @@ func (tc *TumblrClient) HandleMatrixReadReceipt(ctx context.Context, msg *bridge
 	if err != nil {
 		return err
 	}
+	tc.resyncDMBlock(msg.Portal)
 	if !msg.ReadUpTo.After(msg.LastRead) {
 		return nil
 	}
@@ -37,6 +38,7 @@ func (tc *TumblrClient) HandleMatrixViewingChat(ctx context.Context, msg *bridge
 	if msg == nil || msg.Portal == nil {
 		return nil
 	}
+	tc.resyncDMBlock(msg.Portal)
 	return tc.markPortalRead(ctx, msg.Portal)
 }
 
