@@ -45,12 +45,12 @@ func (c *Client) ListBlockedBlogs(ctx context.Context, owner string) ([]Blog, er
 		if err != nil {
 			return nil, err
 		}
-		if page.Blogs == nil || len(*page.Blogs) > 20 || page.Links != nil && page.Other != nil {
+		if page.Blogs == nil {
 			return nil, fmt.Errorf("invalid Tumblr block list")
 		}
 		for _, blog := range *page.Blogs {
 			if !IsBlogUUID(blog.UUID) || blog.UUID == owner || seenIDs[blog.UUID] {
-				return nil, fmt.Errorf("invalid or repeated Tumblr blocked blog")
+				continue
 			}
 			seenIDs[blog.UUID] = true
 			blogs = append(blogs, blog)

@@ -54,7 +54,23 @@ func (tc *TumblrClient) HandleMatrixBlockUser(ctx context.Context, msg *bridgev2
 	if err != nil {
 		return err
 	}
-	return tc.handleRemoteError(client.SetBlogBlocked(ctx, owner, peer, msg.Content.Block))
+	lockCtx, release, err := tc.acquireOutboundSubmissionLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	tc.dmBlockRevision.Add(1)
+	defer tc.dmBlockRevision.Add(1)
+	if err = tc.handleRemoteError(client.SetBlogBlocked(lockCtx, owner, peer, msg.Content.Block)); err != nil {
+		return err
+	}
+	if !msg.Content.Block {
+		if err = tc.connector.DB.Jobs.PutLiveConversation(lockCtx, tc.userLogin.ID, string(msg.Portal.ID)); err != nil {
+			return err
+		}
+		tc.wakeInboundSync()
+	}
+	return nil
 }
 
 func (tc *TumblrClient) resyncDMBlock(portal *bridgev2.Portal) {
@@ -69,14 +85,15 @@ func (tc *TumblrClient) resyncDMBlock(portal *bridgev2.Portal) {
 		return
 	}
 	roomID := portal.MXID
-	go tc.userLogin.QueueRemoteEvent(&simplevent.ChatResync{
-		EventMeta: simplevent.EventMeta{Type: bridgev2.RemoteEventChatResync, PortalKey: portal.PortalKey},
-		GetChatInfoFunc: func(ctx context.Context, current *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
-			if _, loaded := tc.dmBlockResyncInFlight.LoadOrStore(portal.PortalKey, true); loaded {
+	portalKey := portal.PortalKey
+	revision := tc.dmBlockRevision.Load()
+	go func() {
+		refresh := func(ctx context.Context) (*bridgev2.ChatInfo, error) {
+			if _, loaded := tc.dmBlockResyncInFlight.LoadOrStore(portalKey, true); loaded {
 				return nil, nil
 			}
-			defer tc.dmBlockResyncInFlight.Delete(portal.PortalKey)
-			if last, ok := tc.dmBlockResyncLast.Load(portal.PortalKey); ok && time.Since(last.(time.Time)) < 10*time.Minute {
+			defer tc.dmBlockResyncInFlight.Delete(portalKey)
+			if last, ok := tc.dmBlockResyncLast.Load(portalKey); ok && time.Since(last.(time.Time)) < 10*time.Minute {
 				return nil, nil
 			}
 			if !tc.beginOwnedOperation() {
@@ -86,18 +103,10 @@ func (tc *TumblrClient) resyncDMBlock(portal *bridgev2.Portal) {
 			if err := tc.requireLoggedIn(); err != nil {
 				return nil, err
 			}
-			currentOwner, currentPeer, err := tc.blockTarget(current)
-			if err != nil {
-				return nil, err
-			}
-			if currentOwner != owner || currentPeer != peer || current.MXID != roomID {
-				return nil, errors.New("block target changed before refresh")
-			}
 			client, err := tc.tumblrClient()
 			if err != nil {
 				return nil, err
 			}
-			wasBlocked := current.UserBlocked
 			if time.Now().UnixNano() < tc.dmBlockRetryAfter.Load() {
 				return nil, nil
 			}
@@ -117,11 +126,30 @@ func (tc *TumblrClient) resyncDMBlock(portal *bridgev2.Portal) {
 			for _, blog := range blogs {
 				blocked = blocked || blog.UUID == peer
 			}
-			tc.dmBlockResyncLast.Store(portal.PortalKey, time.Now())
-			if blocked == wasBlocked {
-				return nil, nil
-			}
 			return &bridgev2.ChatInfo{UserBlocked: &blocked}, nil
-		},
-	})
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		info, err := refresh(ctx)
+		if err != nil || info == nil {
+			return
+		}
+		tc.userLogin.QueueRemoteEvent(&simplevent.ChatResync{
+			EventMeta: simplevent.EventMeta{Type: bridgev2.RemoteEventChatResync, PortalKey: portalKey},
+			GetChatInfoFunc: func(ctx context.Context, current *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
+				if tc.dmBlockRevision.Load() != revision {
+					return nil, nil
+				}
+				currentOwner, currentPeer, err := tc.blockTarget(current)
+				if err != nil || currentOwner != owner || currentPeer != peer || current.MXID != roomID {
+					return nil, errors.New("block target changed before refresh")
+				}
+				if err = tc.requireLoggedIn(); err != nil {
+					return nil, err
+				}
+				tc.dmBlockResyncLast.Store(portalKey, time.Now())
+				return info, nil
+			},
+		})
+	}()
 }

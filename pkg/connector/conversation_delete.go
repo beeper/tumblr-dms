@@ -18,8 +18,6 @@ import (
 	"github.com/beeper/tumblr-dms/pkg/tumblr"
 )
 
-const maxBlockCheckAttempts = 3
-
 type conversationBlockCheckKey struct{}
 
 type conversationBlockCheck struct {
@@ -143,12 +141,12 @@ func (tc *TumblrClient) handleRemoteConversationDelete(
 			if check.owner != owner || check.peer != peer || check.roomID != portal.MXID {
 				return fmt.Errorf("tumblr deletion target changed during block check")
 			}
-			if check.err != nil && (tumblr.IsAuthError(check.err) || job.AttemptCount < maxBlockCheckAttempts) {
+			if check.err != nil {
 				return fmt.Errorf("failed to check Tumblr blocks before conversation deletion: %w", check.err)
 			}
 			if check.blocked {
 				tc.resyncDMBlock(portal)
-				return fmt.Errorf("tumblr conversation is unavailable while its peer is blocked")
+				return nil
 			}
 		}
 	}
