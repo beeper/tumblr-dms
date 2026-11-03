@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+const maxBlockListEmptyPages = 5
+
 var blogUUIDPattern = regexp.MustCompile(`^t:[A-Za-z0-9_-]+$`)
 
 func IsBlogUUID(value string) bool {
@@ -33,6 +35,7 @@ func (c *Client) ListBlockedBlogs(ctx context.Context, owner string) ([]Blog, er
 	}
 	var blogs []Blog
 	seenIDs := make(map[string]bool)
+	emptyPages := 0
 	for offset := 0; ; {
 		var page struct {
 			Blogs *[]Blog        `json:"blockedTumblelogs"`
@@ -64,7 +67,12 @@ func (c *Client) ListBlockedBlogs(ctx context.Context, owner string) ([]Blog, er
 			links = page.Other
 		}
 		if len(*page.Blogs) == 0 {
-			return blogs, nil
+			emptyPages++
+			if emptyPages > maxBlockListEmptyPages {
+				return nil, fmt.Errorf("tumblr block list returned too many empty pages")
+			}
+		} else {
+			emptyPages = 0
 		}
 		next := offset + len(*page.Blogs)
 		if links != nil && links.Next != nil {
@@ -86,6 +94,9 @@ func (c *Client) ListBlockedBlogs(ctx context.Context, owner string) ([]Blog, er
 			next = parsed
 		} else if len(*page.Blogs) < 20 {
 			return blogs, nil
+		}
+		if next <= offset {
+			return nil, fmt.Errorf("tumblr block list continuation did not advance")
 		}
 		offset = next
 		timer := time.NewTimer(time.Second)
