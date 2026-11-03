@@ -26,11 +26,14 @@ func (tc *TumblrConnector) SetUseDirectMedia() {
 // Only the subdomain and path are stored to keep content URIs short.
 func encodeDirectMediaID(rawURL string) networkid.MediaID {
 	u, err := url.Parse(rawURL)
-	if err != nil || !tumblr.IsDownloadURLAllowed(rawURL) || u.RawQuery != "" || u.Path == "" ||
-		!strings.HasSuffix("."+u.Hostname(), "."+directMediaHost) {
+	if err != nil || !tumblr.IsDownloadURLAllowed(rawURL) || u.RawQuery != "" || u.Path == "" {
 		return nil
 	}
-	return append([]byte{1}, strings.TrimSuffix(u.Hostname(), directMediaHost)+u.EscapedPath()...)
+	subdomain, ok := strings.CutSuffix(u.Hostname(), directMediaHost)
+	if !ok || !isDirectMediaSubdomain(subdomain) {
+		return nil
+	}
+	return append([]byte{1}, subdomain+u.EscapedPath()...)
 }
 
 func parseDirectMediaID(mediaID networkid.MediaID) (string, error) {
@@ -38,7 +41,16 @@ func parseDirectMediaID(mediaID networkid.MediaID) (string, error) {
 		return "", mediaproxy.ErrInvalidMediaIDSyntax
 	}
 	subdomain, path, _ := strings.Cut(string(mediaID[1:]), "/")
+	if !isDirectMediaSubdomain(subdomain) {
+		return "", mediaproxy.ErrInvalidMediaIDSyntax
+	}
 	return "https://" + subdomain + directMediaHost + "/" + path, nil
+}
+
+// Tumblr serves images from media.tumblr.com and single-label shards like 64.media.tumblr.com.
+func isDirectMediaSubdomain(subdomain string) bool {
+	label, ok := strings.CutSuffix(subdomain, ".")
+	return subdomain == "" || ok && label != "" && strings.Trim(label, "abcdefghijklmnopqrstuvwxyz0123456789-") == ""
 }
 
 func (tc *TumblrClient) directMediaContent(
