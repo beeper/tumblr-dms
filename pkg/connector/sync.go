@@ -31,6 +31,7 @@ const (
 	maxPostSummaryRunes            = 160
 	maxUnsupportedMessageTypeRunes = 80
 	maxTumblrTimestampFutureSkew   = 24 * time.Hour
+	conversationBoundaryTimeSlack  = time.Hour
 	tumblrPortalMutationTimeout    = 2 * time.Minute
 	unknownTumblrUserID            = networkid.UserID("unknown-tumblr-user")
 )
@@ -196,6 +197,11 @@ func (tc *TumblrClient) fetchConversationForSync(
 			conversation.Messages.Data = aggregateConversationMessagePages(messagePages)
 			return conversation, fetchedHeadMessageID, nil
 		}
+		if previousCompletedHeadMessageID != "" && conversationPageReachesTime(pageMessages, previousCompletedAt.Add(-conversationBoundaryTimeSlack)) {
+			tc.logUnfinishedConversationHistoryScan(scan, "boundary_time_passed")
+			conversation.Messages.Data = aggregateConversationMessagePages(messagePages)
+			return conversation, fetchedHeadMessageID, nil
+		}
 		nextBefore, cursorErr := resp.NextBefore()
 		if cursorErr != nil {
 			return tumblr.Conversation{}, "", cursorErr
@@ -334,6 +340,19 @@ func conversationPageHeadMessageID(messages []tumblr.Message) string {
 		}
 	}
 	return ""
+}
+
+func conversationPageReachesTime(messages []tumblr.Message, cutoff time.Time) bool {
+	if cutoff.IsZero() || cutoff.UnixMilli() <= 0 {
+		return false
+	}
+	cutoffMillis := cutoff.UnixMilli()
+	for _, message := range messages {
+		if message.Timestamp > 0 && message.Timestamp <= cutoffMillis {
+			return true
+		}
+	}
+	return false
 }
 
 func conversationPageContainsMessageID(messages []tumblr.Message, messageID string) bool {
