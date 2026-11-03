@@ -346,9 +346,8 @@ func conversationPageReachesTime(messages []tumblr.Message, cutoff time.Time) bo
 	if cutoff.IsZero() || cutoff.UnixMilli() <= 0 {
 		return false
 	}
-	cutoffMillis := cutoff.UnixMilli()
 	for _, message := range messages {
-		if message.Timestamp > 0 && message.Timestamp <= cutoffMillis {
+		if message.Timestamp > 0 && !tumblrTimestamp(message.Timestamp).After(cutoff) {
 			return true
 		}
 	}
