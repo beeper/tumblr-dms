@@ -63,6 +63,9 @@ func (c *Client) ListBlockedBlogs(ctx context.Context, owner string) ([]Blog, er
 		if links == nil {
 			links = page.Other
 		}
+		if len(*page.Blogs) == 0 {
+			return blogs, nil
+		}
 		next := offset + len(*page.Blogs)
 		if links != nil && links.Next != nil {
 			if links.Next.Method != "" && links.Next.Method != http.MethodGet {
@@ -77,9 +80,10 @@ func (c *Client) ListBlockedBlogs(ctx context.Context, owner string) ([]Blog, er
 				value = parsed.Query().Get("offset")
 			}
 			parsed, parseErr := strconv.Atoi(value)
-			if parseErr != nil || parsed != next || next <= offset {
-				return nil, fmt.Errorf("non-contiguous Tumblr block list continuation")
+			if parseErr != nil || parsed <= offset {
+				return nil, fmt.Errorf("tumblr block list continuation did not advance")
 			}
+			next = parsed
 		} else if len(*page.Blogs) < 20 {
 			return blogs, nil
 		}
