@@ -27,7 +27,10 @@ const (
 	tumblrRateLimitCooldown              = 5 * time.Minute
 )
 
-var errTumblrConversationJobSuperseded = errors.New("tumblr conversation job was superseded")
+var (
+	errTumblrConversationJobSuperseded = errors.New("tumblr conversation job was superseded")
+	errTumblrRateLimited               = errors.New("tumblr is rate limiting this login")
+)
 
 func (tc *TumblrClient) ensureInboundSyncStarted(generation *connectionGeneration) {
 	if generation == nil {
@@ -142,6 +145,10 @@ func (tc *TumblrClient) inboundSyncLoop(generation *connectionGeneration, wake <
 		case <-poll.C:
 		case <-headProbe.C:
 			if remaining := tc.rateLimitRemaining(); remaining > 0 {
+				headProbeFailures++
+				if headProbeFailures >= tumblrSyncFailedThreshold {
+					tc.setRemoteUnavailable(generation, errTumblrRateLimited)
+				}
 				headProbe.Reset(remaining)
 				continue
 			}
