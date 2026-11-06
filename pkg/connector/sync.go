@@ -97,7 +97,7 @@ func (tc *TumblrClient) syncConversationByIDWithSubmissionLock(
 	if tumblr.IsForbidden(err) && !tc.remoteForbidden.Load() {
 		renamed, renameErr := tc.refreshRenamedSelectedBlog(ctx, client)
 		if renameErr != nil {
-			return nil, fmt.Errorf("%w (failed to check Tumblr blog name: %w)", err, renameErr)
+			return nil, fmt.Errorf("failed to check Tumblr blog name: %w (after %w)", renameErr, err)
 		}
 		if renamed {
 			if log := tc.log(); log != nil {
