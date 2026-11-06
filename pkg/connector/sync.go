@@ -94,6 +94,30 @@ func (tc *TumblrClient) syncConversationByIDWithSubmissionLock(
 		tumblr.Conversation{ID: conversationID},
 		limit,
 	)
+	if tumblr.IsForbidden(err) && !tc.remoteForbidden.Load() {
+		renamed, renameErr := tc.refreshRenamedSelectedBlog(ctx, client)
+		if renameErr != nil {
+			return nil, fmt.Errorf("failed to check Tumblr blog name: %w (after %w)", renameErr, err)
+		}
+		if renamed {
+			if log := tc.log(); log != nil {
+				log.Info().
+					Str("conversation_id_hash", logIdentifierHash(conversationID)).
+					Msg("Tumblr blog was renamed, retrying conversation sync with the new name")
+			}
+			meta, err = tc.validatedLoginMetadata()
+			if err != nil {
+				return nil, err
+			}
+			conversation, fetchedHeadMessageID, err = tc.fetchConversationForSync(
+				ctx,
+				client,
+				meta.SelectedBlogName,
+				tumblr.Conversation{ID: conversationID},
+				limit,
+			)
+		}
+	}
 	if err != nil {
 		if tumblr.IsNotFound(err) {
 			if job == nil {
