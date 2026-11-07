@@ -360,10 +360,14 @@ func (h *Heartbeat) start(ctx context.Context, mcsClient *mcs) {
 				pingDeadman.Reset(deadmanTimeout)
 			}
 		case <-pingDeadmanC:
+			mcsClient.log.Warn().
+				Stringer("deadman_timeout", deadmanTimeout).
+				Msg("No FCM heartbeat acknowledgement before the deadman timeout, disconnecting")
 			mcsClient.disconnect()
 			return
 		case <-pingTickerC:
 			if err := mcsClient.SendHeartbeatPingPacket(); err != nil {
+				mcsClient.log.Warn().Err(err).Msg("Failed to send FCM heartbeat ping, disconnecting")
 				mcsClient.disconnect()
 				return
 			}
