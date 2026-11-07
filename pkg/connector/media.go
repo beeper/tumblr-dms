@@ -228,7 +228,16 @@ func (tc *TumblrClient) convertTumblrImage(
 	retryableTransientFailure := false
 	mismatchedCandidates := 0
 	for candidateIndex, image := range candidates {
-		downloaded, err := tc.downloadTumblrImage(ctx, client, image.URL, retryTransientDownloads)
+		content, mismatched := tc.directMediaContent(ctx, portal, client, image.URL, requiredMIMEType)
+		if mismatched {
+			mismatchedCandidates++
+			continue
+		}
+		var downloaded tumblr.DownloadedImage
+		var err error
+		if content == nil {
+			downloaded, err = tc.downloadTumblrImage(ctx, client, image.URL, retryTransientDownloads)
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, false, ctx.Err()
@@ -248,25 +257,26 @@ func (tc *TumblrClient) convertTumblrImage(
 			}
 			continue
 		}
-		if requiredMIMEType != "" && downloaded.MIMEType != requiredMIMEType {
+		if content == nil && requiredMIMEType != "" && downloaded.MIMEType != requiredMIMEType {
 			mismatchedCandidates++
 			continue
 		}
-		fileName := tumblrImageFileName(downloaded.MIMEType, logicalIndex)
-		mxc, file, err := intent.UploadMedia(ctx, roomID, downloaded.Data, fileName, downloaded.MIMEType)
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil, false, ctx.Err()
+		if content == nil {
+			fileName := tumblrImageFileName(downloaded.MIMEType, logicalIndex)
+			mxc, file, err := intent.UploadMedia(ctx, roomID, downloaded.Data, fileName, downloaded.MIMEType)
+			if err != nil {
+				if ctx.Err() != nil {
+					return nil, false, ctx.Err()
+				}
+				return nil, false, &matrixMediaUploadError{err: err}
 			}
-			return nil, false, &matrixMediaUploadError{err: err}
+			content = &event.MessageEventContent{URL: mxc, File: file, Info: &event.FileInfo{
+				MimeType: downloaded.MIMEType, Size: len(downloaded.Data),
+			}}
 		}
-		info := &event.FileInfo{
-			MimeType: downloaded.MIMEType,
-			Size:     len(downloaded.Data),
-			Width:    max(image.Width, 0),
-			Height:   max(image.Height, 0),
-		}
-		if downloaded.MIMEType == "image/gif" {
+		info := content.Info
+		info.Width, info.Height = max(image.Width, 0), max(image.Height, 0)
+		if info.MimeType == "image/gif" {
 			info.IsAnimated = true
 			info.MauGIF = true
 		}
@@ -276,16 +286,12 @@ func (tc *TumblrClient) convertTumblrImage(
 			eventType = event.EventSticker
 			msgType = event.CapMsgSticker
 		}
+		content.MsgType = msgType
+		content.Body = tumblrImageFileName(info.MimeType, logicalIndex)
+		content.FileName = content.Body
 		return &bridgev2.ConvertedMessagePart{
-			Type: eventType,
-			Content: &event.MessageEventContent{
-				MsgType:  msgType,
-				Body:     fileName,
-				FileName: fileName,
-				URL:      mxc,
-				File:     file,
-				Info:     info,
-			},
+			Type:       eventType,
+			Content:    content,
 			DBMetadata: &MessageMetadata{Type: msgconv.MessageMetadataType(message.Type)},
 		}, false, nil
 	}

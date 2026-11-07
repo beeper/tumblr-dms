@@ -15,6 +15,7 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -411,6 +412,28 @@ func isAnimatedWebP(data []byte) bool {
 		offset += 8 + paddedLength
 	}
 	return false
+}
+
+func (c *Client) HeadImage(ctx context.Context, rawURL string) (string, int64, error) {
+	downloadURL, err := normalizeDownloadURL(rawURL)
+	if err != nil {
+		return "", 0, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, downloadURL, nil)
+	if err != nil {
+		return "", 0, err
+	}
+	setAnonymousImageHeaders(req, c.userAgent)
+	resp, err := c.downloadHTTPClient().Do(req)
+	if err != nil {
+		return "", 0, err
+	}
+	defer resp.Body.Close()
+	mimeType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if resp.StatusCode != http.StatusOK || err != nil || CanonicalImageExtension(mimeType) == "" {
+		return "", 0, fmt.Errorf("image HEAD did not return a supported content type")
+	}
+	return mimeType, resp.ContentLength, nil
 }
 
 func (c *Client) DownloadImage(ctx context.Context, rawURL string, maxBytes int64) (DownloadedImage, error) {

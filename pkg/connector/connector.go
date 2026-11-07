@@ -10,6 +10,7 @@ import (
 	"maunium.net/go/mautrix/id"
 
 	"github.com/beeper/tumblr-dms/pkg/connector/tumblrdb"
+	"github.com/beeper/tumblr-dms/pkg/tumblr"
 )
 
 type TumblrConnector struct {
@@ -19,6 +20,8 @@ type TumblrConnector struct {
 	portalMutationLock      sync.Mutex
 	outboundSubmissionLocks sync.Map
 	maxFileSize             atomic.Int64
+	directMedia             bool
+	directMediaClient       *tumblr.Client
 }
 
 var _ bridgev2.NetworkConnector = (*TumblrConnector)(nil)
@@ -30,6 +33,7 @@ func (tc *TumblrConnector) SetMaxFileSize(maxSize int64) {
 
 func (tc *TumblrConnector) Init(bridge *bridgev2.Bridge) {
 	tc.Bridge = bridge
+	tc.directMediaClient = tumblr.NewClient(tumblr.Options{HTTPClient: tc.newHTTPClient(), UserAgent: tc.Config.BrowserUserAgent()})
 	tc.DB = tumblrdb.New(
 		bridge.ID,
 		bridge.DB.Database,
