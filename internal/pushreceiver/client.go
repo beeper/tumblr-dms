@@ -190,6 +190,9 @@ func (c *MCSClient) Listen(ctx context.Context) {
 			c.creds = nil
 		}
 		if c.retryDisabled {
+			if ctx.Err() == nil {
+				zerolog.Ctx(ctx).Warn().Err(err).Msg("FCM connection ended")
+			}
 			return
 		}
 		sleepDuration := c.backoff.duration()
