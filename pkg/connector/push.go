@@ -593,15 +593,15 @@ func (tc *TumblrClient) markPushTransient(generation *connectionGeneration, code
 	if !tc.isCurrentGeneration(generation) || !tc.loggedIn.Load() {
 		return
 	}
+	if log := tc.log(); log != nil && err != nil {
+		log.Warn().Err(err).Str("state_error", string(code)).Msg("Tumblr push receiver is temporarily unavailable")
+	}
 	if !tc.pushRegistrationDown.CompareAndSwap(nil, &status.BridgeState{
 		StateEvent: status.StateTransientDisconnect,
 		Error:      code,
 		Message:    message,
 	}) {
 		return
-	}
-	if log := tc.log(); log != nil && err != nil {
-		log.Warn().Err(err).Str("state_error", string(code)).Msg("Tumblr push receiver is temporarily unavailable")
 	}
 	tc.sendLiveConnectionState(generation)
 }
