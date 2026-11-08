@@ -715,6 +715,11 @@ func (c *Client) Logout(ctx context.Context) error {
 	if err == nil {
 		err = c.doOnce(ctx, http.MethodDelete, "/v2/user/session", nil, nil, nil)
 	}
+	if IsForbidden(err) {
+		if err = c.Bootstrap(ctx); err == nil {
+			err = c.doOnce(ctx, http.MethodDelete, "/v2/user/session", nil, nil, nil)
+		}
+	}
 	if IsAuthError(err) {
 		return nil
 	}
