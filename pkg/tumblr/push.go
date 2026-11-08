@@ -54,6 +54,10 @@ func (c *Client) UnregisterWebPushDeviceForLogout(ctx context.Context, registrat
 		err = c.doOnce(ctx, http.MethodPost, "/v2/device/unregister", nil, registration, nil)
 		if currentCSRF := c.CSRFToken(); loginHasErrorCode(err, 1023) && currentCSRF != "" && currentCSRF != previousCSRF {
 			err = c.doOnce(ctx, http.MethodPost, "/v2/device/unregister", nil, registration, nil)
+		} else if IsAuthError(err) {
+			if err = c.Bootstrap(ctx); err == nil {
+				err = c.doOnce(ctx, http.MethodPost, "/v2/device/unregister", nil, registration, nil)
+			}
 		}
 	}
 	if IsAuthError(err) {
