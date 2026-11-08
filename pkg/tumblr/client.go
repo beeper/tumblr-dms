@@ -720,6 +720,10 @@ func (c *Client) Logout(ctx context.Context) error {
 		err = c.doOnce(ctx, http.MethodDelete, "/v2/user/session", nil, nil, nil)
 		if currentCSRF := c.CSRFToken(); loginHasErrorCode(err, 1023) && currentCSRF != "" && currentCSRF != previousCSRF {
 			err = c.doOnce(ctx, http.MethodDelete, "/v2/user/session", nil, nil, nil)
+		} else if IsAuthError(err) {
+			if err = c.Bootstrap(ctx); err == nil {
+				err = c.doOnce(ctx, http.MethodDelete, "/v2/user/session", nil, nil, nil)
+			}
 		}
 	}
 	if IsAuthError(err) {
