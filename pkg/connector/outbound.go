@@ -67,6 +67,7 @@ type outboundCandidateSet struct {
 type outboundReconciliationResult struct {
 	transactions   map[string]networkid.TransactionID
 	heldMessageIDs map[string]struct{}
+	unverified     bool
 }
 
 // forcedOutboundCandidateMatches maximizes how many eligible remote echoes are
@@ -796,7 +797,7 @@ func (tc *TumblrClient) finishDueOutboundSend(
 		return nil
 	}
 	var held *outboundReconciliationDeferredError
-	if syncErr != nil && !errors.As(syncErr, &held) {
+	if syncErr != nil && (!errors.As(syncErr, &held) || held.unverified) {
 		return tc.deferOutboundRecovery(ctx, reloaded, syncErr)
 	}
 	if err := tc.markOutboundUnconfirmed(ctx, reloaded); err != nil {
@@ -1603,6 +1604,7 @@ func (tc *TumblrClient) reconcileOutboundConversation(ctx context.Context, conve
 			}
 		}
 	}
+	result.unverified = len(blockedMessages) > 0
 	eligibleSets := make([]outboundCandidateSet, 0, len(sets))
 	for _, set := range sets {
 		if _, blocked := blockedSends[set.send.TransactionID]; !blocked {
