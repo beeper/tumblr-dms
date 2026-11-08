@@ -191,6 +191,10 @@ func (tc *TumblrClient) inboundSyncLoop(generation *connectionGeneration, wake <
 				reconcile.Reset(remaining)
 				continue
 			}
+			if tc.remoteForbidden.Load() {
+				reconcile.Reset(jitterDuration(tumblrReconciliationInterval, tumblrReconciliationInterval/5))
+				continue
+			}
 			if err := tc.reconcileConversationHead(ctx); err != nil && ctx.Err() == nil {
 				tc.noteRateLimit(err)
 				if log := tc.log(); log != nil {
@@ -201,6 +205,13 @@ func (tc *TumblrClient) inboundSyncLoop(generation *connectionGeneration, wake <
 		case <-deletionReconcile.C:
 			if remaining := tc.rateLimitRemaining(); remaining > 0 {
 				deletionReconcile.Reset(remaining)
+				continue
+			}
+			if tc.remoteForbidden.Load() {
+				deletionReconcile.Reset(jitterDuration(
+					tumblrDeletionReconciliationInterval,
+					tumblrDeletionReconciliationInterval/5,
+				))
 				continue
 			}
 			if err := tc.reconcileConversationDeletions(ctx); err != nil && ctx.Err() == nil {
