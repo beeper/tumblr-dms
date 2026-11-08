@@ -507,6 +507,18 @@ func (c *Client) refreshAuthAfterFailure(ctx context.Context, failedGeneration u
 	}
 }
 
+func (c *Client) recoverAuthFailure(ctx context.Context, authErr error, mutating bool, sentCSRF string, failedGeneration uint64) error {
+	if mutating && loginHasErrorCode(authErr, 1023) {
+		if csrf := c.CSRFToken(); csrf != "" && csrf != sentCSRF {
+			return nil
+		}
+	}
+	if c.doOnce(ctx, http.MethodGet, "/v2/user/counts", url.Values{"unread_messages": {"true"}}, nil, nil) == nil {
+		return nil
+	}
+	return c.refreshAuthAfterFailure(ctx, failedGeneration)
+}
+
 func (c *Client) currentAuthGeneration() uint64 {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -1339,11 +1351,12 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	transientAttempt := 0
 	for {
 		requestGeneration := c.currentAuthGeneration()
+		sentCSRF := c.CSRFToken()
 		err = c.doOnce(ctx, method, path, query, body, out)
-		if ShouldRefreshAuth(err, mutating) && !authRetried {
+		if IsSessionInvalid(err) && !authRetried {
 			authRetried = true
 			authErr := err
-			if refreshErr := c.refreshAuthAfterFailure(ctx, requestGeneration); refreshErr != nil {
+			if refreshErr := c.recoverAuthFailure(ctx, err, mutating, sentCSRF, requestGeneration); refreshErr != nil {
 				return fmt.Errorf("tumblr API %s returned %v; authentication refresh failed: %w", method, authErr, refreshErr)
 			}
 			if mutating && !c.hasCSRFToken() {
@@ -1382,6 +1395,7 @@ func (c *Client) doMessageSend(ctx context.Context, query url.Values, body any, 
 		return &MessageSendError{Err: fmt.Errorf("tumblr API CSRF token is missing"), Definite: true}
 	}
 	requestGeneration := c.currentAuthGeneration()
+	sentCSRF := c.CSRFToken()
 	err := c.doOnceWithRedirectPolicy(
 		ctx,
 		http.MethodPost,
@@ -1396,10 +1410,10 @@ func (c *Client) doMessageSend(ctx context.Context, query url.Values, body any, 
 	}
 	definite := isDefiniteMessageRejection(err)
 	sendErr := &MessageSendError{Err: err, Definite: definite}
-	if !definite || !ShouldRefreshAuth(err, true) {
+	if !definite || !IsSessionInvalid(err) {
 		return sendErr
 	}
-	if refreshErr := c.refreshAuthAfterFailure(ctx, requestGeneration); refreshErr != nil {
+	if refreshErr := c.recoverAuthFailure(ctx, err, true, sentCSRF, requestGeneration); refreshErr != nil {
 		sendErr.authRefreshError = fmt.Errorf("refresh Tumblr authentication after rejected message: %w", refreshErr)
 		return sendErr
 	}

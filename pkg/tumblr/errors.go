@@ -155,15 +155,6 @@ func IsForbidden(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.IsForbidden()
 }
 
-func ShouldRefreshAuth(err error, mutating bool) bool {
-	var sendErr *MessageSendError
-	if errors.As(err, &sendErr) && sendErr.authRefreshError != nil {
-		return IsSessionInvalid(sendErr.authRefreshError) ||
-			(mutating && IsForbidden(sendErr.authRefreshError))
-	}
-	return IsSessionInvalid(err) || (mutating && IsForbidden(err))
-}
-
 func IsIncompleteSession(err error) bool {
 	var bootstrapErr *BootstrapError
 	return errors.As(err, &bootstrapErr) && bootstrapErr.IsIncompleteSession()
