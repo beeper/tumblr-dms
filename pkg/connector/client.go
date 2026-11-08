@@ -37,6 +37,7 @@ type TumblrClient struct {
 	connector          *TumblrConnector
 	userLogin          *bridgev2.UserLogin
 	client             *tumblr.Client
+	selectedBlog       atomic.Pointer[tumblr.Blog]
 	loggedIn           atomic.Bool
 	stateLock          sync.Mutex
 	ownershipLock      sync.Mutex
@@ -486,6 +487,7 @@ func (tc *TumblrClient) runConnectionGeneration(generation *connectionGeneration
 		tc.failGeneration(generation, tumblrBadCredentialsStateWithCode("tumblr-invalid-login-metadata", metadataErr))
 		return
 	}
+	tc.updateOwnGhost(ctx)
 	if err := tc.saveOwnedUserLogin(ctx); err != nil {
 		if log := tc.log(); log != nil {
 			log.Warn().Err(err).Msg("Failed to save refreshed Tumblr account")
@@ -508,14 +510,34 @@ func (tc *TumblrClient) applySelectedBlog(client *tumblr.Client, userInfo *tumbl
 	liveMeta.UserName = userName(userInfo, blog)
 	liveMeta.SelectedBlogName = blog.Name
 	liveMeta.SelectedBlogUUID = blog.UUID
+	tc.selectedBlog.Store(&tumblr.Blog{UUID: blog.UUID, Name: blog.Name, Avatar: blog.Avatar})
 	if tc.userLogin != nil && tc.userLogin.UserLogin != nil {
 		tc.userLogin.RemoteName = blog.Name
 		tc.userLogin.RemoteProfile = status.RemoteProfile{
 			Username: blog.Name,
 			Name:     displayName(tc.connector, blog),
+			Avatar:   tc.userLogin.RemoteProfile.Avatar,
 		}
 	}
 	return nil
+}
+
+func (tc *TumblrClient) updateOwnGhost(ctx context.Context) {
+	blog := tc.selectedBlog.Load()
+	if blog == nil {
+		return
+	}
+	ghost, err := tc.connector.Bridge.GetGhostByID(ctx, tumblrBlogUserID(*blog))
+	if err != nil {
+		if log := tc.log(); log != nil {
+			log.Warn().Err(err).Msg("Failed to get own Tumblr ghost")
+		}
+		return
+	}
+	ghost.UpdateInfo(ctx, tc.blogUserInfo(*blog))
+	tc.loginMetadataLock.Lock()
+	tc.userLogin.RemoteProfile.Avatar = ghost.AvatarMXC
+	tc.loginMetadataLock.Unlock()
 }
 
 func (tc *TumblrClient) refreshRenamedSelectedBlog(ctx context.Context, client *tumblr.Client) (bool, error) {
@@ -541,6 +563,7 @@ func (tc *TumblrClient) refreshRenamedSelectedBlog(ctx context.Context, client *
 	if err = tc.applySelectedBlog(client, userInfo, blog); err != nil {
 		return false, err
 	}
+	tc.updateOwnGhost(ctx)
 	if err = tc.saveOwnedUserLogin(ctx); err != nil {
 		return true, fmt.Errorf("failed to save renamed Tumblr blog: %w", err)
 	}
@@ -682,32 +705,19 @@ func (tc *TumblrClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal
 	return info, nil
 }
 
-func (tc *TumblrClient) GetUserInfo(_ context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
+func (tc *TumblrClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
 	if ghost == nil || ghost.Ghost == nil || strings.TrimSpace(string(ghost.ID)) == "" {
 		return nil, fmt.Errorf("ghost is required to get Tumblr user info")
 	}
-	name := string(ghost.ID)
-	if !validGhostID(name) {
-		return nil, fmt.Errorf("tumblr ghost id contains invalid characters")
+	if ghost.ID == unknownTumblrUserID {
+		name := string(unknownTumblrUserID)
+		return &bridgev2.UserInfo{Name: &name}, nil
 	}
-	displayName := cleanDisplayName(name)
-	return &bridgev2.UserInfo{
-		Identifiers: []string{"tumblr:" + name},
-		Name:        &displayName,
-	}, nil
-}
-
-func validGhostID(userID string) bool {
-	if !validRemoteID(userID) {
-		return false
+	blog := tc.selectedBlog.Load()
+	if blog == nil || !tc.IsThisUser(ctx, ghost.ID) {
+		return nil, nil
 	}
-	if strings.ContainsAny(userID, `/\?#.`) {
-		return false
-	}
-	if strings.Contains(userID, ":") && !strings.HasPrefix(userID, "t:") {
-		return false
-	}
-	return true
+	return tc.blogUserInfo(*blog), nil
 }
 
 func (tc *TumblrClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, error) {
