@@ -35,6 +35,7 @@ const (
 	outboundRecoveryMaxAge      = 24 * time.Hour
 	outboundTerminalRetention   = 30 * 24 * time.Hour
 	outboundWorkerPollInterval  = 2 * time.Second
+	outboundWorkerMaxWait       = time.Minute
 	outboundMatchBefore         = 2 * time.Minute
 	outboundMatchAfter          = 15 * time.Minute
 	outboundInitialRecoveryMax  = 20
@@ -493,6 +494,8 @@ func (tc *TumblrClient) outboundSyncLoop(generation *connectionGeneration, wake 
 			delay := time.Until(nextDue)
 			if err != nil || delay <= 0 {
 				delay = outboundWorkerPollInterval
+			} else if delay > outboundWorkerMaxWait {
+				delay = outboundWorkerMaxWait
 			}
 			timer.Reset(delay)
 			timerC = timer.C
@@ -1419,6 +1422,7 @@ func (tc *TumblrClient) reconcileOutboundConversation(ctx context.Context, conve
 			if _, err = tc.bindOutboundSendToConversation(ctx, send, conversation.ID); err != nil {
 				return outboundReconciliationResult{}, err
 			}
+			tc.wakeOutboundSync()
 		}
 	}
 
