@@ -537,7 +537,7 @@ func (tc *TumblrClient) prepareConversationDelivery(
 	fallbackTimestamp := time.Now()
 	messages, err := tc.messagesForConversationSync(ctx, portalKey, conversation, firstSeen, forceChatResync, newMessages)
 	if err != nil {
-		tc.forgetFirstSeenConversation(conversation.ID, firstSeen)
+		tc.forgetSeenConversation(conversation.ID)
 		return nil, err
 	}
 	var readReceipt *simplevent.Receipt
@@ -551,7 +551,7 @@ func (tc *TumblrClient) prepareConversationDelivery(
 		conversation,
 		firstSeen,
 	); err != nil {
-		tc.forgetFirstSeenConversation(conversation.ID, firstSeen)
+		tc.forgetSeenConversation(conversation.ID)
 		return nil, err
 	}
 	return &conversationDelivery{
@@ -786,10 +786,7 @@ func (tc *TumblrClient) markConversationSeen(conversation tumblr.Conversation) (
 	return
 }
 
-func (tc *TumblrClient) forgetFirstSeenConversation(conversationID string, firstSeen bool) {
-	if !firstSeen {
-		return
-	}
+func (tc *TumblrClient) forgetSeenConversation(conversationID string) {
 	tc.seenLock.Lock()
 	defer tc.seenLock.Unlock()
 	delete(tc.seenConversations, conversationID)
