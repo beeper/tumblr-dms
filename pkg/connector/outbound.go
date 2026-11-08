@@ -795,7 +795,8 @@ func (tc *TumblrClient) finishDueOutboundSend(
 		}
 		return nil
 	}
-	if syncErr != nil {
+	var held *outboundReconciliationDeferredError
+	if syncErr != nil && !errors.As(syncErr, &held) {
 		return tc.deferOutboundRecovery(ctx, reloaded, syncErr)
 	}
 	if err := tc.markOutboundUnconfirmed(ctx, reloaded); err != nil {
