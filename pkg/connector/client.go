@@ -424,7 +424,7 @@ func (tc *TumblrClient) runConnectionGeneration(generation *connectionGeneration
 		err = client.BootstrapIfNeeded(ctx)
 		if err == nil {
 			unexpectedCode = "tumblr-current-user-failed"
-			userInfo, err = client.CurrentUser(ctx)
+			userInfo, err = client.CurrentUser(tumblr.WithSingleAuthRefresh(ctx))
 		}
 		if err == nil {
 			if _, blogErr := selectedBlogFromCurrentUser(userInfo, meta); errors.Is(blogErr, errSelectedBlogCannotMessage) {
