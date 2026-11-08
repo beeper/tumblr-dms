@@ -711,7 +711,10 @@ func (c *Client) CurrentUser(ctx context.Context) (*UserInfoResponse, error) {
 }
 
 func (c *Client) Logout(ctx context.Context) error {
-	err := c.bootstrapIfNeeded(ctx, true)
+	var err error
+	if c.needsBootstrap(true) {
+		err = c.bootstrapIfNeeded(ctx, true)
+	}
 	if err == nil {
 		previousCSRF := c.CSRFToken()
 		err = c.doOnce(ctx, http.MethodDelete, "/v2/user/session", nil, nil, nil)
