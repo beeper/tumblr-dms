@@ -1,8 +1,10 @@
 package tumblrdb
 
 import (
+	"embed"
 	"sync"
 
+	"github.com/rs/zerolog"
 	"go.mau.fi/util/dbutil"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 )
@@ -18,7 +20,13 @@ type Database struct {
 	postgresCoordinationSlots     chan struct{}
 }
 
-func New(bridgeID networkid.BridgeID, db *dbutil.Database) *Database {
+var table = dbutil.BuildUpgradeTable().WithFS(upgrades).Finish()
+
+//go:embed *.sql
+var upgrades embed.FS
+
+func New(bridgeID networkid.BridgeID, db *dbutil.Database, log zerolog.Logger) *Database {
+	db = db.Child("tumblr_version", table, dbutil.ZeroLogger(log))
 	return &Database{
 		Database: db,
 		Jobs: &ConversationJobQuery{

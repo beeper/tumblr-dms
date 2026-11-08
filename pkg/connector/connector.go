@@ -37,12 +37,13 @@ func (tc *TumblrConnector) Init(bridge *bridgev2.Bridge) {
 	tc.DB = tumblrdb.New(
 		bridge.ID,
 		bridge.DB.Database,
+		bridge.Log.With().Str("db_section", "tumblr").Logger(),
 	)
 }
 
 func (tc *TumblrConnector) Start(ctx context.Context) error {
-	if err := tc.DB.Initialize(ctx); err != nil {
-		return err
+	if err := tc.DB.Upgrade(ctx); err != nil {
+		return bridgev2.DBUpgradeError{Err: err, Section: "tumblr"}
 	}
 	return nil
 }

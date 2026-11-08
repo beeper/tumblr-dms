@@ -1,5 +1,4 @@
--- Fresh-install Tumblr bridge schema.
--- Startup creates the complete current schema atomically on an empty database.
+-- v0 -> v1: Latest schema
 
 CREATE TABLE IF NOT EXISTS tumblr_conversation_sync_job (
     bridge_id       TEXT    NOT NULL,
