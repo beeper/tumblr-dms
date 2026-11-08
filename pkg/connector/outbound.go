@@ -1801,29 +1801,3 @@ func findConversationMessage(messages []tumblr.Message, messageID string) *tumbl
 	}
 	return nil
 }
-
-func (tc *TumblrClient) outboundBaseline(ctx context.Context, client *tumblr.Client, selectedBlogName, conversationID string) ([]networkid.MessageID, error) {
-	if conversationID == "" {
-		return []networkid.MessageID{}, nil
-	}
-	resp, err := client.GetConversation(ctx, selectedBlogName, conversationID, tumblr.MaxRequestLimit)
-	if err != nil {
-		return nil, tc.handleRemoteError(err)
-	}
-	if err = validateConversationHistoryResponse(conversationID, resp); err != nil {
-		return nil, err
-	}
-	ids := make([]networkid.MessageID, 0, len(resp.Messages))
-	seen := make(map[string]struct{}, len(resp.Messages))
-	for _, message := range resp.Messages {
-		if !validRemoteID(message.ID) {
-			continue
-		}
-		if _, duplicate := seen[message.ID]; duplicate {
-			continue
-		}
-		seen[message.ID] = struct{}{}
-		ids = append(ids, tumblrid.MakeMessageID(message.ID))
-	}
-	return ids, nil
-}

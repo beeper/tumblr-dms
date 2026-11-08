@@ -957,17 +957,13 @@ func (tc *TumblrClient) sendMatrixMessageToTumblr(ctx context.Context, msg *brid
 		return tc.pendingAfterPreparedOwnershipLoss(ctx, send)
 	}
 
-	baseline, err := tc.outboundBaseline(ctx, client, meta.SelectedBlogName, conversationID)
-	if err != nil {
-		return tc.deletePreparedOutbound(ctx, persisted, err)
-	}
 	submitStartedAt := time.Now()
 	submitDeadline := submitStartedAt.Add(outboundUnconfirmedTimeout)
 	claimed, err := tc.connector.DB.Outbound.MarkSubmitting(
 		ctx,
 		persisted.UserLoginID,
 		persisted.TransactionID,
-		baseline,
+		nil,
 		submitStartedAt,
 		submitDeadline,
 	)
@@ -978,7 +974,6 @@ func (tc *TumblrClient) sendMatrixMessageToTumblr(ctx context.Context, msg *brid
 		return tc.pendingAfterPreparedOwnershipLoss(ctx, persisted)
 	}
 	persisted.State = tumblrdb.OutboundSendSubmitting
-	persisted.BaselineMessageIDs = append([]networkid.MessageID(nil), baseline...)
 	persisted.SendStartedAt = submitStartedAt
 	persisted.NextAttemptAt = submitDeadline
 	dbMessage := tc.registerOutboundPending(msg, persisted)
