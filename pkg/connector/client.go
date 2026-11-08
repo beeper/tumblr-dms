@@ -29,6 +29,10 @@ type TumblrClient struct {
 	dmBlockResyncInFlight sync.Map
 	dmBlockRetryAfter     atomic.Int64
 	dmBlockRevision       atomic.Uint64
+	dmBlockListSem        chan struct{}
+	dmBlockList           map[string]bool
+	dmBlockListTime       time.Time
+	dmBlockListRevision   uint64
 
 	connector          *TumblrConnector
 	userLogin          *bridgev2.UserLogin
@@ -117,6 +121,7 @@ func NewTumblrClient(login *bridgev2.UserLogin, connector *TumblrConnector, clie
 		bridgedReadTimestamps:      make(map[string]int64),
 		seenMessages:               make(map[string]struct{}),
 		outboundPending:            make(map[networkid.TransactionID]*outboundPendingRegistration),
+		dmBlockListSem:             make(chan struct{}, 1),
 	}
 }
 

@@ -406,11 +406,9 @@ func (tc *TumblrClient) processSelectedConversationJob(
 	}
 	client, err := tc.tumblrClient()
 	if err == nil {
-		var blogs []tumblr.Blog
-		blogs, err = client.ListBlockedBlogs(ctx, check.owner)
-		for _, blog := range blogs {
-			check.blocked = check.blocked || blog.UUID == check.peer
-		}
+		var blocked map[string]bool
+		blocked, err = tc.blockedBlogUUIDs(ctx, client, check.owner, true)
+		check.blocked = blocked[check.peer]
 	}
 	check.err = tc.handleRemoteError(err)
 	return tc.processSelectedConversationJobWithBlockCheck(context.WithValue(ctx, conversationBlockCheckKey{}, check), selected)

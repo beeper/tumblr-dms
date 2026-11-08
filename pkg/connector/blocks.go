@@ -110,7 +110,7 @@ func (tc *TumblrClient) resyncDMBlock(portal *bridgev2.Portal) {
 			if time.Now().UnixNano() < tc.dmBlockRetryAfter.Load() {
 				return nil, nil
 			}
-			blogs, err := client.ListBlockedBlogs(ctx, owner)
+			blockedBlogs, err := tc.blockedBlogUUIDs(ctx, client, owner, false)
 			if err != nil {
 				if ctx.Err() == nil {
 					retryAfter := time.Now().Add(30 * time.Second).UnixNano()
@@ -122,10 +122,7 @@ func (tc *TumblrClient) resyncDMBlock(portal *bridgev2.Portal) {
 				}
 				return nil, tc.handleRemoteError(err)
 			}
-			blocked := false
-			for _, blog := range blogs {
-				blocked = blocked || blog.UUID == peer
-			}
+			blocked := blockedBlogs[peer]
 			return &bridgev2.ChatInfo{UserBlocked: &blocked}, nil
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -152,4 +149,27 @@ func (tc *TumblrClient) resyncDMBlock(portal *bridgev2.Portal) {
 			},
 		})
 	}()
+}
+
+func (tc *TumblrClient) blockedBlogUUIDs(ctx context.Context, client *tumblr.Client, owner string, fresh bool) (map[string]bool, error) {
+	select {
+	case tc.dmBlockListSem <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	defer func() { <-tc.dmBlockListSem }()
+	revision := tc.dmBlockRevision.Load()
+	if !fresh && tc.dmBlockList != nil && tc.dmBlockListRevision == revision && time.Since(tc.dmBlockListTime) < time.Hour {
+		return tc.dmBlockList, nil
+	}
+	blogs, err := client.ListBlockedBlogs(ctx, owner)
+	if err != nil {
+		return nil, err
+	}
+	blocked := make(map[string]bool, len(blogs))
+	for _, blog := range blogs {
+		blocked[blog.UUID] = true
+	}
+	tc.dmBlockList, tc.dmBlockListTime, tc.dmBlockListRevision = blocked, time.Now(), revision
+	return blocked, nil
 }
