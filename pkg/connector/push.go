@@ -206,6 +206,7 @@ func (tc *TumblrClient) pushSupervisor(generation *connectionGeneration) {
 			}
 		}
 
+		receiverStarted := time.Now()
 		outcome, requestedDelay := tc.runPushReceiver(generation, prepared)
 		if outcome == pushReceiverStopped {
 			return
@@ -215,6 +216,9 @@ func (tc *TumblrClient) pushSupervisor(generation *connectionGeneration) {
 			validateExisting = false
 			retryDelay = 2 * time.Second
 			continue
+		}
+		if time.Since(receiverStarted) > time.Minute {
+			retryDelay = 2 * time.Second
 		}
 		if requestedDelay > retryDelay {
 			retryDelay = requestedDelay
