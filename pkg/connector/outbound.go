@@ -12,12 +12,9 @@ import (
 	"sync"
 	"time"
 
-	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
-	"maunium.net/go/mautrix/bridgev2/matrix"
 	"maunium.net/go/mautrix/bridgev2/networkid"
-	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
 
 	"github.com/beeper/tumblr-dms/pkg/connector/tumblrdb"
@@ -140,30 +137,6 @@ func newOutboundStatusClaimToken() (string, error) {
 		return "", fmt.Errorf("generate outbound status claim token: %w", err)
 	}
 	return hex.EncodeToString(token[:]), nil
-}
-
-func outboundStatusTransactionID(send *tumblrdb.OutboundSend, messageStatus *bridgev2.MessageStatus, channel string) string {
-	hasher := sha256.New()
-	for _, field := range []string{
-		"tumblr-outbound-status-v1",
-		channel,
-		string(send.BridgeID),
-		string(send.UserLoginID),
-		string(send.TransactionID),
-		string(send.MatrixRoomID),
-		string(send.MatrixEventID),
-		string(send.InputTransactionID),
-		string(messageStatus.Status),
-		string(messageStatus.ErrorReason),
-		messageStatus.Message,
-		fmt.Sprintf("%t", messageStatus.IsCertain),
-		string(messageStatus.Step),
-		fmt.Sprintf("%d", messageStatus.RetryNum),
-	} {
-		_, _ = fmt.Fprintf(hasher, "%d:", len(field))
-		_, _ = hasher.Write([]byte(field))
-	}
-	return "tumblr-status-" + hex.EncodeToString(hasher.Sum(nil))
 }
 
 func outboundMessageType(messageType string) (tumblrdb.OutboundMessageType, error) {
@@ -719,9 +692,6 @@ func (tc *TumblrClient) markOutboundUnconfirmed(ctx context.Context, send *tumbl
 	return tc.finishOutboundUnconfirmed(ctx, send)
 }
 
-// notifyOutboundStatusAtLeastOnce claims one durable delivery attempt for a
-// terminal outcome. Matrix transaction IDs make retries safe if delivery
-// succeeds but the process stops before the claim is finished.
 func (tc *TumblrClient) notifyOutboundStatusAtLeastOnce(ctx context.Context, send *tumblrdb.OutboundSend, messageStatus bridgev2.MessageStatus) error {
 	if send == nil {
 		return fmt.Errorf("tumblr outbound send is required")
@@ -923,53 +893,7 @@ func (tc *TumblrClient) sendOutboundStatus(
 		MessageType:   msgType,
 		Sender:        send.MatrixSenderID,
 	}
-	matrixConnector, ok := tc.connector.Bridge.Matrix.(*matrix.Connector)
-	if !ok {
-		tc.connector.Bridge.Matrix.SendMessageStatus(ctx, messageStatusInfo, eventInfo)
-		return nil
-	}
-	if matrixConnector == nil || matrixConnector.Bot == nil || matrixConnector.Config == nil {
-		return fmt.Errorf("synchronous matrix status sender is unavailable")
-	}
-
-	if err := matrixConnector.SendMessageCheckpoints(ctx, []*status.MessageCheckpoint{messageStatusInfo.ToCheckpoint(eventInfo)}); err != nil {
-		if log := tc.log(); log != nil {
-			log.Warn().Err(err).
-				Stringer("room_id", eventInfo.RoomID).
-				Stringer("event_id", eventInfo.SourceEventID).
-				Msg("Failed to send Tumblr outbound message checkpoint")
-		}
-	}
-	if !messageStatusInfo.DisableMSS && matrixConnector.Config.Matrix.MessageStatusEvents {
-		_, err := matrixConnector.Bot.SendMessageEvent(
-			ctx,
-			eventInfo.RoomID,
-			event.BeeperMessageStatus,
-			messageStatusInfo.ToMSSEvent(eventInfo),
-			mautrix.ReqSendEvent{TransactionID: outboundStatusTransactionID(send, messageStatusInfo, "mss")},
-		)
-		if err != nil {
-			return fmt.Errorf("send Tumblr outbound Matrix status event: %w", err)
-		}
-	}
-	if messageStatusInfo.SendNotice && matrixConnector.Config.Matrix.MessageErrorNotices && eventInfo.MessageType != event.MsgNotice &&
-		(messageStatusInfo.Status == event.MessageStatusFail || messageStatusInfo.Status == event.MessageStatusRetriable || messageStatusInfo.Step == status.MsgStepDecrypted) {
-		_, err := matrixConnector.Bot.SendMessageEvent(
-			ctx,
-			eventInfo.RoomID,
-			event.EventMessage,
-			messageStatusInfo.ToNoticeEvent(eventInfo),
-			mautrix.ReqSendEvent{TransactionID: outboundStatusTransactionID(send, messageStatusInfo, "notice")},
-		)
-		if err != nil {
-			return fmt.Errorf("send Tumblr outbound Matrix status notice: %w", err)
-		}
-	}
-	if messageStatusInfo.Status == event.MessageStatusSuccess && matrixConnector.Config.Matrix.DeliveryReceipts {
-		if err := matrixConnector.Bot.SendReceipt(ctx, eventInfo.RoomID, eventInfo.SourceEventID, event.ReceiptTypeRead, nil); err != nil {
-			return fmt.Errorf("send Tumblr outbound Matrix delivery receipt: %w", err)
-		}
-	}
+	tc.connector.Bridge.Matrix.SendMessageStatus(context.WithoutCancel(ctx), messageStatusInfo, eventInfo)
 	return nil
 }
 
