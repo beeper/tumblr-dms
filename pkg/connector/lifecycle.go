@@ -5,6 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/status"
 )
 
@@ -57,6 +58,7 @@ func (tc *TumblrClient) retireForReplacement() {
 	}
 	tc.ownershipLock.Lock()
 	tc.retired = true
+	tc.retireCancel()
 	tc.ownershipLock.Unlock()
 	tc.ownershipWG.Wait()
 	tc.setLoggedIn(false)
@@ -68,6 +70,7 @@ func (tc *TumblrClient) reactivateAfterReplacementFailure() {
 	}
 	tc.ownershipLock.Lock()
 	tc.retired = false
+	tc.retireCtx, tc.retireCancel = context.WithCancel(context.Background())
 	tc.ownershipLock.Unlock()
 }
 
@@ -138,19 +141,24 @@ func stopConnectionGeneration(generation *connectionGeneration) {
 	generation.wg.Wait()
 }
 
-func (tc *TumblrClient) generationContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(ctx)
+func (tc *TumblrClient) generationContext(ctx context.Context) (context.Context, context.CancelFunc, error) {
+	tc.ownershipLock.Lock()
+	retireCtx := tc.retireCtx
+	tc.ownershipLock.Unlock()
 	tc.generationLock.Lock()
 	generation := tc.generation
 	tc.generationLock.Unlock()
-	if generation == nil {
-		return ctx, cancel
+	if generation == nil || generation.ctx.Err() != nil || retireCtx.Err() != nil {
+		return nil, nil, bridgev2.ErrNotLoggedIn
 	}
-	stop := context.AfterFunc(generation.ctx, cancel)
+	ctx, cancel := context.WithCancel(ctx)
+	stopGeneration := context.AfterFunc(generation.ctx, cancel)
+	stopRetire := context.AfterFunc(retireCtx, cancel)
 	return ctx, func() {
-		stop()
+		stopGeneration()
+		stopRetire()
 		cancel()
-	}
+	}, nil
 }
 
 func (tc *TumblrClient) isCurrentGeneration(generation *connectionGeneration) bool {
