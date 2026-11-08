@@ -29,7 +29,8 @@ const (
 	MaxMessageTextRunes     = 4096
 	MaxRequestLimit         = 100
 	defaultUserAgent        = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36"
-	DefaultMaxUploadBytes   = 5 * 1024 * 1024
+	DefaultMaxUploadBytes   = 20_000_000
+	MaxGIFUploadBytes       = 10_000_000
 	DefaultMaxDownloadBytes = 50 * 1024 * 1024
 	maxBootstrapPageBytes   = 4 * 1024 * 1024
 	maxAPIResponseBytes     = 8 * 1024 * 1024
@@ -1223,18 +1224,25 @@ func requireImageUpload(input ImageUpload) (ImageUpload, error) {
 	if len(input.Data) == 0 {
 		return ImageUpload{}, fmt.Errorf("image data is empty")
 	}
-	if int64(len(input.Data)) > DefaultMaxUploadBytes {
-		return ImageUpload{}, fmt.Errorf("image data is too large")
-	}
 	contentType, err := SniffImageMIME(input.Data)
 	if err != nil {
 		return ImageUpload{}, err
+	}
+	if int64(len(input.Data)) > MaxUploadBytes(contentType) {
+		return ImageUpload{}, fmt.Errorf("image data is too large")
 	}
 	return ImageUpload{
 		Data:        append([]byte(nil), input.Data...),
 		FileName:    cleanUploadFileName(input.FileName, contentType),
 		ContentType: contentType,
 	}, nil
+}
+
+func MaxUploadBytes(mimeType string) int64 {
+	if mimeType == "image/gif" {
+		return MaxGIFUploadBytes
+	}
+	return DefaultMaxUploadBytes
 }
 
 func cleanUploadFileName(fileName, contentType string) string {

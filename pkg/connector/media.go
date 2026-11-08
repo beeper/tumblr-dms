@@ -380,8 +380,8 @@ func (tc *TumblrClient) downloadMatrixImage(ctx context.Context, msg *bridgev2.M
 	if msg.Portal == nil || msg.Portal.Bridge == nil || msg.Portal.Bridge.Bot == nil {
 		return tumblr.ImageUpload{}, fmt.Errorf("matrix media downloader is not available")
 	}
-	if info := msg.Content.GetInfo(); info != nil && int64(info.Size) > tumblr.DefaultMaxUploadBytes {
-		return tumblr.ImageUpload{}, fmt.Errorf("%w: Tumblr images must be 5 MiB or smaller", bridgev2.ErrMediaTooLarge)
+	if info := msg.Content.GetInfo(); info != nil && int64(info.Size) > tumblr.MaxUploadBytes(info.MimeType) {
+		return tumblr.ImageUpload{}, tumblrUploadTooLargeError(info.MimeType)
 	}
 
 	requireRawGIF := msg.Content.GetCapMsgType() == event.CapMsgGIF
@@ -392,7 +392,7 @@ func (tc *TumblrClient) downloadMatrixImage(ctx context.Context, msg *bridgev2.M
 		}
 		switch {
 		case errors.Is(err, errMatrixImageTooLarge):
-			return tumblr.ImageUpload{}, fmt.Errorf("%w: Tumblr images must be 5 MiB or smaller", bridgev2.ErrMediaTooLarge)
+			return tumblr.ImageUpload{}, tumblrUploadTooLargeError("")
 		default:
 			return tumblr.ImageUpload{}, fmt.Errorf("%w: %v", bridgev2.ErrMediaDownloadFailed, err)
 		}
@@ -404,11 +404,21 @@ func (tc *TumblrClient) downloadMatrixImage(ctx context.Context, msg *bridgev2.M
 	if requireRawGIF && mimeType != "image/gif" {
 		return tumblr.ImageUpload{}, fmt.Errorf("%w: Tumblr GIFs must be raw GIF image files", bridgev2.ErrUnsupportedMediaType)
 	}
+	if int64(len(data)) > tumblr.MaxUploadBytes(mimeType) {
+		return tumblr.ImageUpload{}, tumblrUploadTooLargeError(mimeType)
+	}
 	return tumblr.ImageUpload{
 		Data:        data,
 		FileName:    msg.Content.GetFileName(),
 		ContentType: mimeType,
 	}, nil
+}
+
+func tumblrUploadTooLargeError(mimeType string) error {
+	if mimeType == "image/gif" {
+		return fmt.Errorf("%w: Tumblr GIFs must be %d MB or smaller", bridgev2.ErrMediaTooLarge, tumblr.MaxGIFUploadBytes/1_000_000)
+	}
+	return fmt.Errorf("%w: Tumblr images must be %d MB or smaller", bridgev2.ErrMediaTooLarge, tumblr.DefaultMaxUploadBytes/1_000_000)
 }
 
 func downloadMatrixMediaBounded(
