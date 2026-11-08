@@ -841,8 +841,8 @@ func (c *Client) GetConversationByParticipants(ctx context.Context, selectedBlog
 	return &response, err
 }
 
-func (c *Client) SendText(ctx context.Context, selectedBlogName, conversationID, text string) (*SendMessageResponse, error) {
-	selectedBlogName, err := requireIdentifierValue(selectedBlogName, "selected blog name")
+func (c *Client) SendText(ctx context.Context, senderParticipantID, conversationID, text string) (*SendMessageResponse, error) {
+	senderParticipantID, err := requireIdentifierValue(senderParticipantID, "sender participant ID")
 	if err != nil {
 		return nil, err
 	}
@@ -862,7 +862,7 @@ func (c *Client) SendText(ctx context.Context, selectedBlogName, conversationID,
 	}, SendMessageRequest{
 		ConversationID: conversationID,
 		Type:           MessageTypeText,
-		Participant:    selectedBlogName,
+		Participant:    senderParticipantID,
 		Message:        text,
 	}, &response)
 	if err == nil {
@@ -901,8 +901,8 @@ func (c *Client) SendTextToParticipants(ctx context.Context, senderParticipantID
 	return &response, classifySendResponseError(err)
 }
 
-func (c *Client) SendImage(ctx context.Context, selectedBlogName, conversationID string, image ImageUpload) (*SendMessageResponse, error) {
-	selectedBlogName, err := requireIdentifierValue(selectedBlogName, "selected blog name")
+func (c *Client) SendImage(ctx context.Context, senderParticipantID, conversationID string, image ImageUpload) (*SendMessageResponse, error) {
+	senderParticipantID, err := requireIdentifierValue(senderParticipantID, "sender participant ID")
 	if err != nil {
 		return nil, err
 	}
@@ -921,7 +921,7 @@ func (c *Client) SendImage(ctx context.Context, selectedBlogName, conversationID
 		Fields: map[string]string{
 			"conversation_id": conversationID,
 			"type":            MessageTypeImage,
-			"participant":     selectedBlogName,
+			"participant":     senderParticipantID,
 		},
 		FileField:       "data",
 		FileName:        image.FileName,

@@ -996,11 +996,11 @@ func (tc *TumblrClient) sendMatrixMessageToTumblr(ctx context.Context, msg *brid
 	} else {
 		switch messageType {
 		case tumblr.MessageTypeImage:
-			resp, err = client.SendImage(ctx, meta.SelectedBlogName, conversationID, image)
+			resp, err = client.SendImage(ctx, meta.SelectedBlogUUID, conversationID, image)
 		case tumblr.MessageTypePostRef:
 			resp, err = client.SendPostRef(ctx, meta.SelectedBlogUUID, conversationID, *post)
 		default:
-			resp, err = client.SendText(ctx, meta.SelectedBlogName, conversationID, text)
+			resp, err = client.SendText(ctx, meta.SelectedBlogUUID, conversationID, text)
 		}
 	}
 	if err != nil {
