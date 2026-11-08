@@ -113,6 +113,14 @@ func SniffImageMIME(data []byte) (string, error) {
 	return mimeType, nil
 }
 
+func ImagePixelCount(data []byte) int64 {
+	config, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return 0
+	}
+	return int64(config.Width) * int64(config.Height)
+}
+
 func CanonicalImageExtension(mimeType string) string {
 	switch mimeType {
 	case "image/jpeg":
@@ -147,7 +155,7 @@ func HashVisualImageContent(data []byte) ([sha256.Size]byte, error) {
 	}
 	pixelCount := uint64(config.Width) * uint64(config.Height)
 	if config.Width > maxVisualHashDimension || config.Height > maxVisualHashDimension || pixelCount > maxVisualHashPixels {
-		return result, newMediaDownloadError(MediaDownloadPermanent, "image dimensions are too large")
+		return result, ErrVisualImageHashUnavailable
 	}
 	if format == "gif" {
 		// gif.DecodeAll allocates every decoded frame before the caller can
