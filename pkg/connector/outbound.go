@@ -1548,7 +1548,8 @@ func (tc *TumblrClient) reconcileOutboundConversation(ctx context.Context, conve
 	sets := make([]outboundCandidateSet, 0, len(matchable))
 	blockedSends := make(map[networkid.TransactionID]struct{})
 	blockedMessages := make(map[string]struct{})
-	transientImageError := false
+	transientMessages := make(map[string]struct{})
+	unverifiedMessages := make(map[networkid.TransactionID][]string)
 	for _, send := range matchable {
 		set := outboundCandidateSet{send: send}
 		structuralImages := make([]*tumblr.Message, 0)
@@ -1575,7 +1576,10 @@ func (tc *TumblrClient) reconcileOutboundConversation(ctx context.Context, conve
 			for _, message := range structuralImages {
 				candidate, matchErr := tc.outboundMessageCandidate(ctx, send, message, true)
 				if matchErr != nil || candidate.indeterminate {
-					transientImageError = transientImageError || matchErr != nil
+					if matchErr != nil {
+						transientMessages[message.ID] = struct{}{}
+					}
+					unverifiedMessages[send.TransactionID] = append(unverifiedMessages[send.TransactionID], message.ID)
 					quarantine[message.ID] = struct{}{}
 					blockedSends[send.TransactionID] = struct{}{}
 					blockedMessages[message.ID] = struct{}{}
@@ -1612,9 +1616,11 @@ func (tc *TumblrClient) reconcileOutboundConversation(ctx context.Context, conve
 			}
 		}
 	}
-	if transientImageError {
-		for txnID := range blockedSends {
-			result.unverifiedSends[txnID] = struct{}{}
+	for _, set := range sets {
+		for _, messageID := range append(unverifiedMessages[set.send.TransactionID], set.messageIDs...) {
+			if _, transient := transientMessages[messageID]; transient {
+				result.unverifiedSends[set.send.TransactionID] = struct{}{}
+			}
 		}
 	}
 	eligibleSets := make([]outboundCandidateSet, 0, len(sets))
@@ -1840,11 +1846,15 @@ func (tc *TumblrClient) outboundMessageCandidate(ctx context.Context, send *tumb
 			return outboundCandidateResult{indeterminate: true}, nil
 		}
 		var lastErr error
-		sourceIdentityIndeterminate := false
+		indeterminate := false
 		// Any matching rendition proves the relation, but a mismatch is definitive
 		// only after every rendition was evaluated successfully.
 		for _, asset := range assets {
 			downloaded, downloadErr := client.DownloadImage(ctx, asset.URL, tumblr.DefaultMaxDownloadBytes)
+			if tumblr.IsPermanentMediaDownloadError(downloadErr) {
+				indeterminate = true
+				continue
+			}
 			if downloadErr != nil {
 				lastErr = downloadErr
 				continue
@@ -1854,7 +1864,7 @@ func (tc *TumblrClient) outboundMessageCandidate(ctx context.Context, send *tumb
 				case send.SourceMediaDigest:
 					return outboundCandidateResult{match: true}, nil
 				case "":
-					sourceIdentityIndeterminate = true
+					indeterminate = true
 				default:
 					// A different valid Tumblr source identity is stronger
 					// disconfirming evidence than equal rendered pixels.
@@ -1866,6 +1876,10 @@ func (tc *TumblrClient) outboundMessageCandidate(ctx context.Context, send *tumb
 				if tumblrdb.HashOutboundContent(downloaded.Data) == send.ContentHash {
 					return outboundCandidateResult{match: true}, nil
 				}
+				continue
+			}
+			if tumblr.IsPermanentMediaDownloadError(hashErr) {
+				indeterminate = true
 				continue
 			}
 			if hashErr != nil {
@@ -1880,7 +1894,7 @@ func (tc *TumblrClient) outboundMessageCandidate(ctx context.Context, send *tumb
 		if lastErr != nil {
 			return outboundCandidateResult{}, lastErr
 		}
-		if sourceIdentityIndeterminate {
+		if indeterminate {
 			return outboundCandidateResult{indeterminate: true}, nil
 		}
 		return outboundCandidateResult{}, nil
