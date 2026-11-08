@@ -20,7 +20,6 @@ func init() {
 	status.BridgeStateHumanErrors.Update(status.BridgeStateErrorMap{
 		"tumblr-bad-credentials":        "Tumblr couldn't verify the saved sign-in. Please sign in again to reconnect to Tumblr.",
 		"tumblr-invalid-login-metadata": "Tumblr sign-in information is incomplete. Please sign in again to reconnect to Tumblr.",
-		"tumblr-incomplete-session":     "Tumblr didn't return a usable session for the saved sign-in. Please sign in again to reconnect to Tumblr.",
 		"tumblr-client-unavailable":     "Beeper couldn't start the Tumblr connection.",
 		"tumblr-bootstrap-failed":       "Beeper couldn't verify the saved Tumblr sign-in because of an unexpected error.",
 		"tumblr-current-user-failed":    "Beeper couldn't load your Tumblr account because of an unexpected error.",

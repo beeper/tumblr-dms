@@ -548,7 +548,11 @@ func connectFailureState(err error, unexpectedCode status.BridgeStateErrorCode) 
 	case tumblr.IsAuthError(err):
 		return tumblrBadCredentialsState(err), false
 	case tumblr.IsIncompleteSession(err):
-		return tumblrBadCredentialsStateWithCode("tumblr-incomplete-session", err), false
+		return status.BridgeState{
+			StateEvent: status.StateUnknownError,
+			Error:      "tumblr-bootstrap-failed",
+			Info:       info,
+		}, false
 	case isTumblrRequestsForbidden(err), errors.Is(err, errSelectedBlogCannotMessage):
 		return status.BridgeState{
 			StateEvent: status.StateTransientDisconnect,
