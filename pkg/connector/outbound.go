@@ -65,9 +65,9 @@ type outboundCandidateSet struct {
 }
 
 type outboundReconciliationResult struct {
-	transactions   map[string]networkid.TransactionID
-	heldMessageIDs map[string]struct{}
-	unverified     bool
+	transactions    map[string]networkid.TransactionID
+	heldMessageIDs  map[string]struct{}
+	unverifiedSends map[networkid.TransactionID]struct{}
 }
 
 // forcedOutboundCandidateMatches maximizes how many eligible remote echoes are
@@ -797,8 +797,13 @@ func (tc *TumblrClient) finishDueOutboundSend(
 		return nil
 	}
 	var held *outboundReconciliationDeferredError
-	if syncErr != nil && (!errors.As(syncErr, &held) || held.unverified) {
-		return tc.deferOutboundRecovery(ctx, reloaded, syncErr)
+	if syncErr != nil {
+		if !errors.As(syncErr, &held) {
+			return tc.deferOutboundRecovery(ctx, reloaded, syncErr)
+		}
+		if _, unverified := held.unverifiedSends[reloaded.TransactionID]; unverified {
+			return tc.deferOutboundRecovery(ctx, reloaded, syncErr)
+		}
 	}
 	if err := tc.markOutboundUnconfirmed(ctx, reloaded); err != nil {
 		return err
@@ -1482,8 +1487,9 @@ func (tc *TumblrClient) outboundPortalMatchesConversation(portalKey networkid.Po
 
 func (tc *TumblrClient) reconcileOutboundConversation(ctx context.Context, conversation *tumblr.Conversation) (outboundReconciliationResult, error) {
 	result := outboundReconciliationResult{
-		transactions:   make(map[string]networkid.TransactionID),
-		heldMessageIDs: make(map[string]struct{}),
+		transactions:    make(map[string]networkid.TransactionID),
+		heldMessageIDs:  make(map[string]struct{}),
+		unverifiedSends: make(map[networkid.TransactionID]struct{}),
 	}
 	if conversation == nil || tc == nil || tc.connector == nil || tc.connector.DB == nil || tc.userLogin == nil {
 		return result, nil
@@ -1542,6 +1548,7 @@ func (tc *TumblrClient) reconcileOutboundConversation(ctx context.Context, conve
 	sets := make([]outboundCandidateSet, 0, len(matchable))
 	blockedSends := make(map[networkid.TransactionID]struct{})
 	blockedMessages := make(map[string]struct{})
+	transientImageError := false
 	for _, send := range matchable {
 		set := outboundCandidateSet{send: send}
 		structuralImages := make([]*tumblr.Message, 0)
@@ -1568,6 +1575,7 @@ func (tc *TumblrClient) reconcileOutboundConversation(ctx context.Context, conve
 			for _, message := range structuralImages {
 				candidate, matchErr := tc.outboundMessageCandidate(ctx, send, message, true)
 				if matchErr != nil || candidate.indeterminate {
+					transientImageError = transientImageError || matchErr != nil
 					quarantine[message.ID] = struct{}{}
 					blockedSends[send.TransactionID] = struct{}{}
 					blockedMessages[message.ID] = struct{}{}
@@ -1604,7 +1612,11 @@ func (tc *TumblrClient) reconcileOutboundConversation(ctx context.Context, conve
 			}
 		}
 	}
-	result.unverified = len(blockedMessages) > 0
+	if transientImageError {
+		for txnID := range blockedSends {
+			result.unverifiedSends[txnID] = struct{}{}
+		}
+	}
 	eligibleSets := make([]outboundCandidateSet, 0, len(sets))
 	for _, set := range sets {
 		if _, blocked := blockedSends[set.send.TransactionID]; !blocked {

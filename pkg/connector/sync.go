@@ -400,8 +400,8 @@ func conversationPageContainsMessageID(messages []tumblr.Message, messageID stri
 }
 
 type outboundReconciliationDeferredError struct {
-	messageCount int
-	unverified   bool
+	messageCount    int
+	unverifiedSends map[networkid.TransactionID]struct{}
 }
 
 func (err *outboundReconciliationDeferredError) Error() string {
@@ -416,7 +416,7 @@ type conversationDelivery struct {
 	fallbackTimestamp    time.Time
 	transactions         map[string]networkid.TransactionID
 	heldMessageCount     int
-	heldUnverified       bool
+	heldUnverified       map[networkid.TransactionID]struct{}
 	fetchedHeadMessageID string
 }
 
@@ -440,7 +440,7 @@ func (tc *TumblrClient) deliverConversation(ctx context.Context, delivery *conve
 	if delivery.heldMessageCount > 0 {
 		// Held messages were deliberately not handed to bridgev2. Keep the
 		// durable head unchanged so this fetch is retried without losing them.
-		return &outboundReconciliationDeferredError{messageCount: delivery.heldMessageCount, unverified: delivery.heldUnverified}
+		return &outboundReconciliationDeferredError{messageCount: delivery.heldMessageCount, unverifiedSends: delivery.heldUnverified}
 	}
 	return nil
 }
@@ -562,7 +562,7 @@ func (tc *TumblrClient) prepareConversationDelivery(
 		fallbackTimestamp:    fallbackTimestamp,
 		transactions:         reconciliation.transactions,
 		heldMessageCount:     len(reconciliation.heldMessageIDs),
-		heldUnverified:       reconciliation.unverified,
+		heldUnverified:       reconciliation.unverifiedSends,
 		fetchedHeadMessageID: fetchedHeadMessageID,
 	}, nil
 }
