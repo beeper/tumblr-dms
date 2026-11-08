@@ -48,11 +48,6 @@ var (
 	loggedOutRe        = regexp.MustCompile(`"isLoggedIn"\s*:\s*false`)
 )
 
-var apiTransientRetryDelays = []time.Duration{
-	500 * time.Millisecond,
-	1250 * time.Millisecond,
-}
-
 var authRefreshRetryDelays = []time.Duration{
 	3 * time.Second,
 	6 * time.Second,
@@ -1336,7 +1331,6 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 
 	var err error
 	authRetried := false
-	transientAttempt := 0
 	for {
 		requestGeneration := c.currentAuthGeneration()
 		err = c.doOnce(ctx, method, path, query, body, out)
@@ -1351,21 +1345,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 			}
 			continue
 		}
-		if !isRetryableTransientSendError(method, path, err) || transientAttempt >= len(apiTransientRetryDelays) {
-			return err
-		}
-		delay := apiTransientRetryDelays[transientAttempt]
-		transientAttempt++
-		if delay <= 0 {
-			continue
-		}
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
+		return err
 	}
 }
 
@@ -1427,14 +1407,6 @@ func isDefiniteMessageRejection(err error) bool {
 	var apiErr *Error
 	return errors.As(err, &apiErr) &&
 		apiErr.StatusCode >= http.StatusBadRequest && apiErr.StatusCode < http.StatusInternalServerError
-}
-
-func isRetryableTransientSendError(method, path string, err error) bool {
-	if method != http.MethodPost || path != "/v2/conversations/messages" {
-		return false
-	}
-	var apiErr *Error
-	return errors.As(err, &apiErr) && apiErr.StatusCode >= http.StatusInternalServerError && apiErr.StatusCode < 600
 }
 
 func (c *Client) doOnce(ctx context.Context, method, path string, query url.Values, body any, out any) error {
