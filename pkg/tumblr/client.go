@@ -472,6 +472,16 @@ func (c *Client) Bootstrap(ctx context.Context) error {
 	return c.bootstrap(ctx)
 }
 
+type singleAuthRefreshContextKey struct{}
+
+func WithSingleAuthRefresh(ctx context.Context) context.Context {
+	return context.WithValue(ctx, singleAuthRefreshContextKey{}, true)
+}
+
+func (c *Client) BootstrapIfNeeded(ctx context.Context) error {
+	return c.bootstrapIfNeeded(ctx, false)
+}
+
 func (c *Client) bootstrapIfNeeded(ctx context.Context, mutating bool) error {
 	c.authRefreshMu.Lock()
 	defer c.authRefreshMu.Unlock()
@@ -495,7 +505,7 @@ func (c *Client) refreshAuthAfterFailure(ctx context.Context, failedGeneration u
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
-		if err == nil || !IsAuthError(err) || attempt >= len(authRefreshRetryDelays) {
+		if single, _ := ctx.Value(singleAuthRefreshContextKey{}).(bool); err == nil || !IsAuthError(err) || single || attempt >= len(authRefreshRetryDelays) {
 			return err
 		}
 		timer := time.NewTimer(authRefreshRetryDelays[attempt])
