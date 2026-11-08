@@ -45,7 +45,10 @@ func (c *Client) UnregisterWebPushDevice(ctx context.Context, registration WebPu
 }
 
 func (c *Client) UnregisterWebPushDeviceForLogout(ctx context.Context, registration WebPushDeviceRegistration) error {
-	err := c.bootstrapIfNeeded(ctx, true)
+	var err error
+	if c.needsBootstrap(true) {
+		err = c.bootstrapIfNeeded(ctx, true)
+	}
 	if err == nil {
 		previousCSRF := c.CSRFToken()
 		err = c.doOnce(ctx, http.MethodPost, "/v2/device/unregister", nil, registration, nil)
