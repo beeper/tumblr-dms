@@ -537,6 +537,7 @@ func (tc *TumblrClient) prepareConversationDelivery(
 	fallbackTimestamp := time.Now()
 	messages, err := tc.messagesForConversationSync(ctx, portalKey, conversation, firstSeen, forceChatResync, newMessages)
 	if err != nil {
+		tc.forgetFirstSeenConversation(conversation.ID, firstSeen)
 		return nil, err
 	}
 	var readReceipt *simplevent.Receipt
@@ -550,6 +551,7 @@ func (tc *TumblrClient) prepareConversationDelivery(
 		conversation,
 		firstSeen,
 	); err != nil {
+		tc.forgetFirstSeenConversation(conversation.ID, firstSeen)
 		return nil, err
 	}
 	return &conversationDelivery{
@@ -622,10 +624,11 @@ func (tc *TumblrClient) ensureConversationPortalForSync(
 			}
 			return tc.confirmTumblrPortalExists(mutationCtx, portalKey)
 		}
-		if !forceResync && !metadataChanged {
+		info := tc.chatInfoFromConversation(conversation)
+		if !forceResync && !metadataChanged && (info.Name == nil || portal.NameSet) && (info.Avatar == nil || portal.AvatarSet) {
 			return nil
 		}
-		portal.UpdateInfo(mutationCtx, tc.chatInfoFromConversation(conversation), tc.userLogin, nil, time.Time{})
+		portal.UpdateInfo(mutationCtx, info, tc.userLogin, nil, time.Time{})
 		if err = mutationCtx.Err(); err != nil {
 			return fmt.Errorf("timed out updating Tumblr conversation room: %w", err)
 		}
@@ -781,6 +784,15 @@ func (tc *TumblrClient) markConversationSeen(conversation tumblr.Conversation) (
 		newMessages = append(newMessages, message)
 	}
 	return
+}
+
+func (tc *TumblrClient) forgetFirstSeenConversation(conversationID string, firstSeen bool) {
+	if !firstSeen {
+		return
+	}
+	tc.seenLock.Lock()
+	defer tc.seenLock.Unlock()
+	delete(tc.seenConversations, conversationID)
 }
 
 func (tc *TumblrClient) readReceiptAlreadyBridged(conversation tumblr.Conversation) bool {
