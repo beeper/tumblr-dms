@@ -510,6 +510,7 @@ func (tc *TumblrClient) applySelectedBlog(userInfo *tumblr.UserInfoResponse, blo
 		tc.userLogin.RemoteProfile = status.RemoteProfile{
 			Username: blog.Name,
 			Name:     displayName(tc.connector, blog),
+			Avatar:   tc.userLogin.RemoteProfile.Avatar,
 		}
 	}
 	return nil
@@ -693,6 +694,10 @@ func (tc *TumblrClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal
 func (tc *TumblrClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
 	if ghost == nil || ghost.Ghost == nil || strings.TrimSpace(string(ghost.ID)) == "" {
 		return nil, fmt.Errorf("ghost is required to get Tumblr user info")
+	}
+	if ghost.ID == unknownTumblrUserID {
+		name := string(unknownTumblrUserID)
+		return &bridgev2.UserInfo{Name: &name}, nil
 	}
 	blog := tc.selectedBlog.Load()
 	if blog == nil || !tc.IsThisUser(ctx, ghost.ID) {
