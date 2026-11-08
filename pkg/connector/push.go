@@ -709,7 +709,7 @@ func (tc *TumblrClient) cleanupRetiringPushRegistrations(ctx context.Context) er
 		if registration == nil || samePushRegistration(registration, active) {
 			continue
 		}
-		if err = tc.unregisterTumblrPushEndpoint(ctx, registration.Token); err != nil {
+		if err = tc.unregisterTumblrPushEndpoint(ctx, registration.Token, false); err != nil {
 			return err
 		}
 		tc.loginMetadataLock.Lock()
@@ -881,7 +881,7 @@ func (tc *TumblrClient) unregisterTumblrWebPush(ctx context.Context) {
 		}
 	}
 	for _, registration := range registrations {
-		if err = tc.unregisterTumblrPushEndpoint(ctx, registration.Token); err != nil {
+		if err = tc.unregisterTumblrPushEndpoint(ctx, registration.Token, true); err != nil {
 			if log := tc.log(); log != nil {
 				log.Warn().Err(err).Msg("Failed to unregister Tumblr web push device")
 			}
@@ -908,7 +908,7 @@ func (tc *TumblrClient) unregisterTumblrWebPush(ctx context.Context) {
 	}
 }
 
-func (tc *TumblrClient) unregisterTumblrPushEndpoint(ctx context.Context, token string) error {
+func (tc *TumblrClient) unregisterTumblrPushEndpoint(ctx context.Context, token string, loggingOut bool) error {
 	token = strings.TrimSpace(token)
 	if token == "" {
 		return nil
@@ -929,6 +929,9 @@ func (tc *TumblrClient) unregisterTumblrPushEndpoint(ctx context.Context, token 
 		P256DH: p256dh,
 		Auth:   auth,
 	})
+	if loggingOut {
+		return client.UnregisterWebPushDeviceForLogout(ctx, registration)
+	}
 	return client.UnregisterWebPushDevice(ctx, registration)
 }
 

@@ -43,3 +43,18 @@ func (c *Client) RegisterWebPushDevice(ctx context.Context, registration WebPush
 func (c *Client) UnregisterWebPushDevice(ctx context.Context, registration WebPushDeviceRegistration) error {
 	return c.do(ctx, http.MethodPost, "/v2/device/unregister", nil, registration, nil)
 }
+
+func (c *Client) UnregisterWebPushDeviceForLogout(ctx context.Context, registration WebPushDeviceRegistration) error {
+	err := c.bootstrapIfNeeded(ctx, true)
+	if err == nil {
+		previousCSRF := c.CSRFToken()
+		err = c.doOnce(ctx, http.MethodPost, "/v2/device/unregister", nil, registration, nil)
+		if currentCSRF := c.CSRFToken(); loginHasErrorCode(err, 1023) && currentCSRF != "" && currentCSRF != previousCSRF {
+			err = c.doOnce(ctx, http.MethodPost, "/v2/device/unregister", nil, registration, nil)
+		}
+	}
+	if IsAuthError(err) {
+		return nil
+	}
+	return err
+}
