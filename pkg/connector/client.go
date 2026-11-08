@@ -29,6 +29,10 @@ type TumblrClient struct {
 	dmBlockResyncInFlight sync.Map
 	dmBlockRetryAfter     atomic.Int64
 	dmBlockRevision       atomic.Uint64
+	dmBlockListLock       sync.Mutex
+	dmBlockList           map[string]bool
+	dmBlockListTime       time.Time
+	dmBlockListRevision   uint64
 
 	connector          *TumblrConnector
 	userLogin          *bridgev2.UserLogin
