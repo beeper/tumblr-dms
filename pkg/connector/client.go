@@ -33,6 +33,7 @@ type TumblrClient struct {
 	connector          *TumblrConnector
 	userLogin          *bridgev2.UserLogin
 	client             *tumblr.Client
+	selectedBlog       atomic.Pointer[tumblr.Blog]
 	loggedIn           atomic.Bool
 	stateLock          sync.Mutex
 	ownershipLock      sync.Mutex
@@ -501,6 +502,8 @@ func (tc *TumblrClient) applySelectedBlog(userInfo *tumblr.UserInfoResponse, blo
 	liveMeta.UserName = userName(userInfo, blog)
 	liveMeta.SelectedBlogName = blog.Name
 	liveMeta.SelectedBlogUUID = blog.UUID
+	selectedBlog := *blog
+	tc.selectedBlog.Store(&selectedBlog)
 	if tc.userLogin != nil && tc.userLogin.UserLogin != nil {
 		tc.userLogin.RemoteName = blog.Name
 		tc.userLogin.RemoteProfile = status.RemoteProfile{
@@ -671,32 +674,15 @@ func (tc *TumblrClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal
 	return info, nil
 }
 
-func (tc *TumblrClient) GetUserInfo(_ context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
+func (tc *TumblrClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
 	if ghost == nil || ghost.Ghost == nil || strings.TrimSpace(string(ghost.ID)) == "" {
 		return nil, fmt.Errorf("ghost is required to get Tumblr user info")
 	}
-	name := string(ghost.ID)
-	if !validGhostID(name) {
-		return nil, fmt.Errorf("tumblr ghost id contains invalid characters")
+	blog := tc.selectedBlog.Load()
+	if blog == nil || !tc.IsThisUser(ctx, ghost.ID) {
+		return nil, nil
 	}
-	displayName := cleanDisplayName(name)
-	return &bridgev2.UserInfo{
-		Identifiers: []string{"tumblr:" + name},
-		Name:        &displayName,
-	}, nil
-}
-
-func validGhostID(userID string) bool {
-	if !validRemoteID(userID) {
-		return false
-	}
-	if strings.ContainsAny(userID, `/\?#.`) {
-		return false
-	}
-	if strings.Contains(userID, ":") && !strings.HasPrefix(userID, "t:") {
-		return false
-	}
-	return true
+	return tc.blogUserInfo(*blog), nil
 }
 
 func (tc *TumblrClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, error) {
