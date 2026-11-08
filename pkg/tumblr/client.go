@@ -710,6 +710,10 @@ func (c *Client) CurrentUser(ctx context.Context) (*UserInfoResponse, error) {
 	return &response, nil
 }
 
+func (c *Client) Logout(ctx context.Context) error {
+	return c.do(ctx, http.MethodDelete, "/v2/user/session", nil, nil, nil)
+}
+
 func (c *Client) GetBlogInfo(ctx context.Context, blogName string) (*BlogInfoResponse, error) {
 	normalized, err := requireIdentifierValue(NormalizeBlogName(blogName), "blog name")
 	if err != nil {
