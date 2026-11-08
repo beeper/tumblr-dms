@@ -727,6 +727,29 @@ func (c *Client) CurrentUser(ctx context.Context) (*UserInfoResponse, error) {
 	return &response, nil
 }
 
+func (c *Client) Logout(ctx context.Context) error {
+	var err error
+	if c.needsBootstrap(true) {
+		err = c.bootstrapIfNeeded(ctx, true)
+	}
+	if err == nil {
+		previousCSRF := c.CSRFToken()
+		err = c.doOnce(ctx, http.MethodDelete, "/v2/user/session", nil, nil, nil)
+		if currentCSRF := c.CSRFToken(); loginHasErrorCode(err, 1023) && currentCSRF != "" && currentCSRF != previousCSRF {
+			err = c.doOnce(ctx, http.MethodDelete, "/v2/user/session", nil, nil, nil)
+		}
+		if IsAuthError(err) {
+			if err = c.Bootstrap(ctx); err == nil {
+				err = c.doOnce(ctx, http.MethodDelete, "/v2/user/session", nil, nil, nil)
+			}
+		}
+	}
+	if IsAuthError(err) {
+		return nil
+	}
+	return err
+}
+
 func (c *Client) GetBlogInfo(ctx context.Context, blogName string) (*BlogInfoResponse, error) {
 	normalized, err := requireIdentifierValue(NormalizeBlogName(blogName), "blog name")
 	if err != nil {

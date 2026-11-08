@@ -655,6 +655,15 @@ func (tc *TumblrClient) LogoutRemote(ctx context.Context) {
 	tc.stopConnectionGeneration()
 	tc.setLoggedIn(false)
 	tc.unregisterTumblrWebPush(ctx)
+	client, err := tc.tumblrClient()
+	if err != nil {
+		return
+	}
+	if err = client.Logout(ctx); err != nil {
+		if log := tc.log(); log != nil {
+			log.Warn().Err(err).Msg("Failed to end Tumblr session")
+		}
+	}
 }
 
 func (tc *TumblrClient) IsThisUser(_ context.Context, userID networkid.UserID) bool {
