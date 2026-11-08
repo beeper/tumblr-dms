@@ -173,6 +173,7 @@ func (tc *TumblrClient) fetchConversationForSync(
 	catchUpExistingPortal := portal != nil && portal.Portal != nil && portal.MXID != ""
 	previousCompletedHeadMessageID := ""
 	var previousCompletedAt time.Time
+	maxPages := 1
 	if catchUpExistingPortal {
 		state, stateErr := tc.connector.DB.ConversationSync.Get(ctx, tc.userLogin.ID, conversationID)
 		if stateErr != nil {
@@ -182,8 +183,7 @@ func (tc *TumblrClient) fetchConversationForSync(
 			previousCompletedHeadMessageID = state.CompletedHeadMessageID
 			previousCompletedAt = state.UpdatedAt
 		}
-		// A portal can be created before its completed boundary is saved if the
-		// process stops mid-delivery. Scan to the end once to recover that work.
+		maxPages = tc.maxCatchupPages(limit)
 	}
 	before := ""
 	seenCursors := make(map[string]struct{})
@@ -191,7 +191,7 @@ func (tc *TumblrClient) fetchConversationForSync(
 	var conversation tumblr.Conversation
 	fetchedHeadMessageID := ""
 	scan := newConversationHistoryScan(conversationID, previousCompletedHeadMessageID, previousCompletedAt)
-	for page := 0; page < maxConversationMessagePages; page++ {
+	for page := 0; page < maxPages; page++ {
 		resp, err := client.GetConversationBefore(ctx, selectedBlogName, conversationID, limit, before)
 		if err != nil {
 			if page > 0 && tumblr.IsNotFound(err) {
@@ -242,8 +242,17 @@ func (tc *TumblrClient) fetchConversationForSync(
 		seenCursors[nextBefore] = struct{}{}
 		before = nextBefore
 	}
-	tc.logUnfinishedConversationHistoryScan(scan, "page_limit")
-	return tumblr.Conversation{}, "", fmt.Errorf("tumblr conversation history exceeded %d pages", maxConversationMessagePages)
+	tc.logUnfinishedConversationHistoryScan(scan, "catchup_limit")
+	conversation.Messages.Data = aggregateConversationMessagePages(messagePages)
+	return conversation, fetchedHeadMessageID, nil
+}
+
+func (tc *TumblrClient) maxCatchupPages(limit int) int {
+	maxMessages := tc.connector.Bridge.Config.Backfill.MaxCatchupMessages
+	if limit <= 0 || maxMessages <= limit {
+		return 1
+	}
+	return min((maxMessages-1)/limit+1, maxConversationMessagePages)
 }
 
 type conversationHistoryScan struct {
