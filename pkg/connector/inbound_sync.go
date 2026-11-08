@@ -263,6 +263,7 @@ func (tc *TumblrClient) probeChangedConversationHeads(ctx context.Context, obser
 		if !validRemoteID(conversation.ID) {
 			continue
 		}
+		tc.bridgeListedReadReceipt(ctx, conversation)
 		headMessageID := conversationPageHeadMessageID(conversation.Messages.Data)
 		if !validRemoteID(headMessageID) {
 			continue
@@ -318,6 +319,38 @@ func (tc *TumblrClient) queueChangedConversationHead(ctx context.Context, conver
 		return false, nil
 	}
 	return true, tc.connector.DB.Jobs.PutLiveConversation(lockCtx, tc.userLogin.ID, conversationID)
+}
+
+func (tc *TumblrClient) bridgeListedReadReceipt(ctx context.Context, conversation tumblr.Conversation) {
+	if conversation.LastReadTimestamp <= 0 || tc.readReceiptAlreadyBridged(conversation) {
+		return
+	}
+	headMessageID := conversationPageHeadMessageID(conversation.Messages.Data)
+	if !validRemoteID(headMessageID) {
+		return
+	}
+	portalKey := tc.portalKey(conversation.ID)
+	head, err := tc.connector.Bridge.DB.Message.GetFirstPartByID(ctx, portalKey.Receiver, tumblrid.MakeMessageID(headMessageID))
+	if err != nil || head == nil {
+		return
+	}
+	portal, err := tc.connector.Bridge.GetExistingPortalByKey(ctx, portalKey)
+	if err != nil || portal == nil || portal.MXID == "" {
+		return
+	}
+	readReceipt := tc.readReceiptEventFromConversation(conversation, portalKey, time.Now())
+	if readReceipt == nil {
+		return
+	}
+	if err = remoteEventQueueError(tc.queueRemoteEvent(readReceipt), "tumblr read receipt"); err != nil {
+		if log := tc.log(); log != nil {
+			log.Warn().Err(err).
+				Str("conversation_id_hash", logIdentifierHash(conversation.ID)).
+				Msg("Failed to bridge Tumblr read state from conversation list")
+		}
+		return
+	}
+	tc.markReadReceiptBridged(conversation)
 }
 
 func (tc *TumblrClient) processDueConversationJobs(ctx context.Context, limit int) error {
@@ -503,13 +536,14 @@ func (tc *TumblrClient) reconcileConversationHead(ctx context.Context) error {
 			if !validRemoteID(conversation.ID) {
 				continue
 			}
+			tc.bridgeListedReadReceipt(ctx, conversation)
 			if conversation.LastModifiedTimestamp > newWatermark {
 				newWatermark = conversation.LastModifiedTimestamp
 			}
 			if previousWatermark > 0 && conversation.LastModifiedTimestamp > 0 && conversation.LastModifiedTimestamp < previousWatermark {
 				continue
 			}
-			if err = tc.putLiveConversationJob(ctx, conversation.ID); err != nil {
+			if _, err = tc.queueChangedConversationHead(ctx, conversation.ID, conversationPageHeadMessageID(conversation.Messages.Data)); err != nil {
 				return err
 			}
 		}
