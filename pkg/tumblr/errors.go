@@ -33,6 +33,7 @@ type Error struct {
 	Body            string
 	ErrorCode       string
 	CaptchaRequired bool
+	csrfRotated     bool
 }
 
 // MessageSendError records whether Tumblr definitely rejected a message or
@@ -153,15 +154,6 @@ func IsSessionInvalid(err error) bool {
 func IsForbidden(err error) bool {
 	var apiErr *Error
 	return errors.As(err, &apiErr) && apiErr.IsForbidden()
-}
-
-func ShouldRefreshAuth(err error, mutating bool) bool {
-	var sendErr *MessageSendError
-	if errors.As(err, &sendErr) && sendErr.authRefreshError != nil {
-		return IsSessionInvalid(sendErr.authRefreshError) ||
-			(mutating && IsForbidden(sendErr.authRefreshError))
-	}
-	return IsSessionInvalid(err) || (mutating && IsForbidden(err))
 }
 
 func IsIncompleteSession(err error) bool {
