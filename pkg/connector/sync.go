@@ -548,7 +548,7 @@ func (tc *TumblrClient) prepareConversationDelivery(
 		ctx,
 		portalKey,
 		conversation,
-		forceChatResync || firstSeen,
+		firstSeen,
 	); err != nil {
 		return nil, err
 	}
