@@ -39,15 +39,7 @@ func (tc *TumblrClient) HandleMatrixViewingChat(ctx context.Context, msg *bridge
 		return nil
 	}
 	tc.resyncDMBlock(msg.Portal)
-	return tc.markPortalRead(ctx, msg.Portal)
-}
-
-func (tc *TumblrClient) markPortalRead(ctx context.Context, portal *bridgev2.Portal) error {
-	conversationID, err := conversationIDFromPortal(portal, "portal is required to mark a Tumblr conversation read")
-	if err != nil {
-		return err
-	}
-	return tc.markConversationRead(ctx, conversationID)
+	return nil
 }
 
 func (tc *TumblrClient) markConversationRead(ctx context.Context, conversationID string) error {
