@@ -711,7 +711,14 @@ func (c *Client) CurrentUser(ctx context.Context) (*UserInfoResponse, error) {
 }
 
 func (c *Client) Logout(ctx context.Context) error {
-	return c.do(ctx, http.MethodDelete, "/v2/user/session", nil, nil, nil)
+	err := c.bootstrapIfNeeded(ctx, true)
+	if err == nil {
+		err = c.doOnce(ctx, http.MethodDelete, "/v2/user/session", nil, nil, nil)
+	}
+	if IsAuthError(err) {
+		return nil
+	}
+	return err
 }
 
 func (c *Client) GetBlogInfo(ctx context.Context, blogName string) (*BlogInfoResponse, error) {
