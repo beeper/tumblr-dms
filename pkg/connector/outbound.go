@@ -91,6 +91,72 @@ func forcedOutboundCandidateMatches(sets []outboundCandidateSet) map[networkid.T
 	return forced
 }
 
+func closestOutboundCandidateMatches(
+	sets []outboundCandidateSet,
+	forced map[networkid.TransactionID]string,
+	messages []tumblr.Message,
+) map[networkid.TransactionID]string {
+	taken := make(map[string]struct{}, len(forced))
+	for _, messageID := range forced {
+		taken[messageID] = struct{}{}
+	}
+	contentByMessage := make(map[string]tumblrdb.OutboundContentHash)
+	mixedContent := make(map[string]struct{})
+	for _, set := range sets {
+		for _, messageID := range set.messageIDs {
+			if hash, seen := contentByMessage[messageID]; seen && hash != set.send.ContentHash {
+				mixedContent[messageID] = struct{}{}
+			}
+			contentByMessage[messageID] = set.send.ContentHash
+		}
+	}
+	type candidateEdge struct {
+		txnID     networkid.TransactionID
+		messageID string
+		distance  time.Duration
+	}
+	edges := make([]candidateEdge, 0)
+	for _, set := range sets {
+		if _, done := forced[set.send.TransactionID]; done {
+			continue
+		}
+		for _, messageID := range set.messageIDs {
+			_, used := taken[messageID]
+			_, mixed := mixedContent[messageID]
+			message := findConversationMessage(messages, messageID)
+			if used || mixed || message == nil {
+				continue
+			}
+			distance := tumblrTimestamp(message.Timestamp).Sub(set.send.SendStartedAt)
+			if distance < 0 {
+				distance = -distance
+			}
+			edges = append(edges, candidateEdge{txnID: set.send.TransactionID, messageID: messageID, distance: distance})
+		}
+	}
+	sort.Slice(edges, func(i, j int) bool {
+		if edges[i].distance != edges[j].distance {
+			return edges[i].distance < edges[j].distance
+		}
+		if edges[i].txnID != edges[j].txnID {
+			return edges[i].txnID < edges[j].txnID
+		}
+		return edges[i].messageID < edges[j].messageID
+	})
+	matches := make(map[networkid.TransactionID]string)
+	for _, edge := range edges {
+		if _, used := taken[edge.messageID]; used {
+			continue
+		}
+		if _, done := matches[edge.txnID]; done {
+			continue
+		}
+		matches[edge.txnID] = edge.messageID
+		taken[edge.messageID] = struct{}{}
+	}
+	return matches
+}
+
 func maximumOutboundCandidateMatching(
 	sets []outboundCandidateSet,
 	blockedSetIndex int,
@@ -1513,6 +1579,9 @@ func (tc *TumblrClient) reconcileOutboundConversation(ctx context.Context, conve
 		}
 	}
 	forcedMatches := forcedOutboundCandidateMatches(eligibleSets)
+	for txnID, messageID := range closestOutboundCandidateMatches(eligibleSets, forcedMatches, conversation.Messages.Data) {
+		forcedMatches[txnID] = messageID
+	}
 	for _, set := range sets {
 		messageID := forcedMatches[set.send.TransactionID]
 		if messageID == "" {
