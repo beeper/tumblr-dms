@@ -239,12 +239,6 @@ const (
 		  AND status_claim_token=$4 AND status_notified_ts=0 AND terminal_ts>0
 		  AND state IN ('not_submitted', 'unconfirmed')
 	`
-	releaseOutboundStatusDeliveryQuery = `
-		UPDATE tumblr_outbound_send
-		SET status_claim_token='', status_claim_expires_ts=0, updated_ts=$5
-		WHERE bridge_id=$1 AND user_login_id=$2 AND transaction_id=$3
-		  AND status_claim_token=$4 AND status_notified_ts=0
-	`
 	bindOutboundSendConversationQuery = `
 		UPDATE tumblr_outbound_send
 		SET portal_id=$4, portal_receiver=$5, conversation_id=$6,
@@ -843,27 +837,6 @@ func (oq *OutboundSendQuery) FinishStatusDelivery(
 		return nil
 	}
 	return ErrOutboundSendNotPending
-}
-
-func (oq *OutboundSendQuery) ReleaseStatusDelivery(
-	ctx context.Context,
-	loginID networkid.UserLoginID,
-	txnID networkid.TransactionID,
-	claimToken string,
-) error {
-	if strings.TrimSpace(claimToken) == "" {
-		return fmt.Errorf("outbound status claim token is required")
-	}
-	_, err := oq.GetDB().Exec(
-		ctx,
-		releaseOutboundStatusDeliveryQuery,
-		oq.BridgeID,
-		loginID,
-		txnID,
-		claimToken,
-		time.Now().UnixMilli(),
-	)
-	return err
 }
 
 func (oq *OutboundSendQuery) BindConversation(
