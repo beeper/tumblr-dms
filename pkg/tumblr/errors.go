@@ -33,6 +33,7 @@ type Error struct {
 	Body            string
 	ErrorCode       string
 	CaptchaRequired bool
+	csrfRotated     bool
 }
 
 // MessageSendError records whether Tumblr definitely rejected a message or

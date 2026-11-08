@@ -507,13 +507,12 @@ func (c *Client) refreshAuthAfterFailure(ctx context.Context, failedGeneration u
 	}
 }
 
-func (c *Client) recoverAuthFailure(ctx context.Context, authErr error, mutating bool, sentCSRF string, failedGeneration uint64) error {
-	if mutating && loginHasErrorCode(authErr, 1023) {
-		if csrf := c.CSRFToken(); csrf != "" && csrf != sentCSRF {
-			return nil
-		}
+func (c *Client) recoverAuthFailure(ctx context.Context, authErr error, mutating bool, failedGeneration uint64) error {
+	var apiErr *Error
+	if mutating && loginHasErrorCode(authErr, 1023) && errors.As(authErr, &apiErr) && apiErr.csrfRotated {
+		return nil
 	}
-	if c.doOnce(ctx, http.MethodGet, "/v2/user/counts", url.Values{"unread_messages": {"true"}}, nil, nil) == nil {
+	if c.doOnce(ctx, http.MethodGet, "/v2/user/counts", nil, nil, nil) == nil {
 		return nil
 	}
 	return c.refreshAuthAfterFailure(ctx, failedGeneration)
@@ -1351,12 +1350,11 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	transientAttempt := 0
 	for {
 		requestGeneration := c.currentAuthGeneration()
-		sentCSRF := c.CSRFToken()
 		err = c.doOnce(ctx, method, path, query, body, out)
 		if IsSessionInvalid(err) && !authRetried {
 			authRetried = true
 			authErr := err
-			if refreshErr := c.recoverAuthFailure(ctx, err, mutating, sentCSRF, requestGeneration); refreshErr != nil {
+			if refreshErr := c.recoverAuthFailure(ctx, err, mutating, requestGeneration); refreshErr != nil {
 				return fmt.Errorf("tumblr API %s returned %v; authentication refresh failed: %w", method, authErr, refreshErr)
 			}
 			if mutating && !c.hasCSRFToken() {
@@ -1384,7 +1382,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 
 // doMessageSend disables redirects and transient retries. It only retries once
 // when Tumblr definitively rejected the first request for expired credentials
-// and fresh credentials were loaded successfully.
+// and the session was confirmed or refreshed.
 func (c *Client) doMessageSend(ctx context.Context, query url.Values, body any, out any) error {
 	if c.needsBootstrap(true) {
 		if err := c.bootstrapIfNeeded(ctx, true); err != nil {
@@ -1395,7 +1393,6 @@ func (c *Client) doMessageSend(ctx context.Context, query url.Values, body any, 
 		return &MessageSendError{Err: fmt.Errorf("tumblr API CSRF token is missing"), Definite: true}
 	}
 	requestGeneration := c.currentAuthGeneration()
-	sentCSRF := c.CSRFToken()
 	err := c.doOnceWithRedirectPolicy(
 		ctx,
 		http.MethodPost,
@@ -1413,7 +1410,7 @@ func (c *Client) doMessageSend(ctx context.Context, query url.Values, body any, 
 	if !definite || !IsSessionInvalid(err) {
 		return sendErr
 	}
-	if refreshErr := c.recoverAuthFailure(ctx, err, true, sentCSRF, requestGeneration); refreshErr != nil {
+	if refreshErr := c.recoverAuthFailure(ctx, err, true, requestGeneration); refreshErr != nil {
 		sendErr.authRefreshError = fmt.Errorf("refresh Tumblr authentication after rejected message: %w", refreshErr)
 		return sendErr
 	}
@@ -1516,7 +1513,8 @@ func (c *Client) doOnceWithRedirectPolicy(ctx context.Context, method, path stri
 		return &requestError{message: "tumblr API request failed", cause: err}
 	}
 	defer resp.Body.Close()
-	if csrf := responseCSRFToken(resp.Header); csrf != "" {
+	csrf := responseCSRFToken(resp.Header)
+	if csrf != "" {
 		c.mu.Lock()
 		c.csrfToken = csrf
 		c.mu.Unlock()
@@ -1559,6 +1557,7 @@ func (c *Client) doOnceWithRedirectPolicy(ctx context.Context, method, path stri
 			Body:            safeErrorBody(responseBody),
 			ErrorCode:       strings.TrimSpace(envelope.ErrorCode),
 			CaptchaRequired: envelope.CaptchaRequired,
+			csrfRotated:     csrf != "" && csrf != req.Header.Get("X-CSRF"),
 		}
 	}
 	if envelope.Meta.Status != 0 && (envelope.Meta.Status < 200 || envelope.Meta.Status >= 300) {
