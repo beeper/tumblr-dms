@@ -482,7 +482,7 @@ func (tc *TumblrClient) runConnectionGeneration(generation *connectionGeneration
 		tc.failGeneration(generation, tumblrBadCredentialsStateWithCode("tumblr-invalid-login-metadata", metadataErr))
 		return
 	}
-	tc.updateOwnGhost(ctx, blog)
+	tc.updateOwnGhost(ctx)
 	if err := tc.saveOwnedUserLogin(ctx); err != nil {
 		if log := tc.log(); log != nil {
 			log.Warn().Err(err).Msg("Failed to save refreshed Tumblr account")
@@ -503,8 +503,7 @@ func (tc *TumblrClient) applySelectedBlog(userInfo *tumblr.UserInfoResponse, blo
 	liveMeta.UserName = userName(userInfo, blog)
 	liveMeta.SelectedBlogName = blog.Name
 	liveMeta.SelectedBlogUUID = blog.UUID
-	selectedBlog := *blog
-	tc.selectedBlog.Store(&selectedBlog)
+	tc.selectedBlog.Store(&tumblr.Blog{UUID: blog.UUID, Name: blog.Name, Avatar: blog.Avatar})
 	if tc.userLogin != nil && tc.userLogin.UserLogin != nil {
 		tc.userLogin.RemoteName = blog.Name
 		tc.userLogin.RemoteProfile = status.RemoteProfile{
@@ -516,7 +515,11 @@ func (tc *TumblrClient) applySelectedBlog(userInfo *tumblr.UserInfoResponse, blo
 	return nil
 }
 
-func (tc *TumblrClient) updateOwnGhost(ctx context.Context, blog *tumblr.Blog) {
+func (tc *TumblrClient) updateOwnGhost(ctx context.Context) {
+	blog := tc.selectedBlog.Load()
+	if blog == nil {
+		return
+	}
 	ghost, err := tc.connector.Bridge.GetGhostByID(ctx, tumblrBlogUserID(*blog))
 	if err != nil {
 		if log := tc.log(); log != nil {
@@ -553,7 +556,7 @@ func (tc *TumblrClient) refreshRenamedSelectedBlog(ctx context.Context, client *
 	if err = tc.applySelectedBlog(userInfo, blog); err != nil {
 		return false, err
 	}
-	tc.updateOwnGhost(ctx, blog)
+	tc.updateOwnGhost(ctx)
 	if err = tc.saveOwnedUserLogin(ctx); err != nil {
 		return true, fmt.Errorf("failed to save renamed Tumblr blog: %w", err)
 	}
