@@ -474,19 +474,34 @@ func (tc *TumblrClient) outboundSyncLoop(generation *connectionGeneration, wake 
 		}
 		tc.outboundLock.Unlock()
 	}()
-	ticker := time.NewTicker(outboundWorkerPollInterval)
-	defer ticker.Stop()
+	timer := time.NewTimer(0)
+	defer timer.Stop()
 	for {
-		if err := tc.processDueOutboundSends(generation.ctx, outboundRecoveryPassMax); err != nil && generation.ctx.Err() == nil {
+		err := tc.processDueOutboundSends(generation.ctx, outboundRecoveryPassMax)
+		var nextDue time.Time
+		if err == nil {
+			nextDue, err = tc.connector.DB.Outbound.GetNextDueTime(generation.ctx, tc.userLogin.ID)
+		}
+		if err != nil && generation.ctx.Err() == nil {
 			if log := tc.log(); log != nil {
 				log.Warn().Err(err).Msg("Tumblr outbound recovery pass failed")
 			}
+		}
+		timer.Stop()
+		var timerC <-chan time.Time
+		if err != nil || !nextDue.IsZero() {
+			delay := time.Until(nextDue)
+			if err != nil || delay <= 0 {
+				delay = outboundWorkerPollInterval
+			}
+			timer.Reset(delay)
+			timerC = timer.C
 		}
 		select {
 		case <-generation.ctx.Done():
 			return
 		case <-wake:
-		case <-ticker.C:
+		case <-timerC:
 		}
 	}
 }
@@ -1529,6 +1544,7 @@ func (tc *TumblrClient) reconcileOutboundConversation(ctx context.Context, conve
 		if claimErr != nil {
 			return outboundReconciliationResult{}, claimErr
 		}
+		tc.wakeOutboundSync()
 		if !claimed {
 			reloaded, reloadErr := tc.connector.DB.Outbound.Get(ctx, tc.userLogin.ID, set.send.TransactionID)
 			if reloadErr != nil {

@@ -178,6 +178,11 @@ const (
 		ORDER BY next_attempt_ts, send_started_ts, created_ts, transaction_id
 		LIMIT 1
 	`
+	getNextOutboundDueTimeQuery = `
+		SELECT COALESCE(MIN(CASE WHEN status_claim_expires_ts>next_attempt_ts THEN status_claim_expires_ts ELSE next_attempt_ts END), 0)
+		FROM tumblr_outbound_send
+		WHERE bridge_id=$1 AND user_login_id=$2 AND state<>'completed'
+	`
 	listUnboundOutboundSendsQuery = `
 		SELECT ` + outboundSendColumns + `
 		FROM tumblr_outbound_send
@@ -557,6 +562,14 @@ func (oq *OutboundSendQuery) GetNextDue(
 		return nil, fmt.Errorf("current time is required to get the next due outbound send")
 	}
 	return oq.QueryOne(ctx, getNextDueOutboundSendQuery, oq.BridgeID, loginID, now.UnixMilli())
+}
+
+func (oq *OutboundSendQuery) GetNextDueTime(ctx context.Context, loginID networkid.UserLoginID) (time.Time, error) {
+	var nextDueTS int64
+	if err := oq.GetDB().QueryRow(ctx, getNextOutboundDueTimeQuery, oq.BridgeID, loginID).Scan(&nextDueTS); err != nil {
+		return time.Time{}, fmt.Errorf("get next outbound due time: %w", err)
+	}
+	return timeFromMillis(nextDueTS), nil
 }
 
 func (oq *OutboundSendQuery) ListUnbound(

@@ -782,6 +782,7 @@ func (tc *TumblrClient) sendMatrixMessageToTumblr(ctx context.Context, msg *brid
 	if msg.Portal == nil || msg.Portal.Portal == nil {
 		return nil, fmt.Errorf("matrix room is required to send a Tumblr message")
 	}
+	defer tc.wakeOutboundSync()
 	lockCtx, releaseSubmission, err := tc.acquireOutboundSubmissionLock(ctx)
 	if err != nil {
 		return nil, err
@@ -910,11 +911,9 @@ func (tc *TumblrClient) sendMatrixMessageToTumblr(ctx context.Context, msg *brid
 	}
 	if !created && persisted.IsTerminal() {
 		tc.dropOutboundPending(persisted.TransactionID, true)
-		tc.wakeOutboundSync()
 		return &bridgev2.MatrixMessageResponse{Pending: true}, nil
 	}
 	if !created && persisted.State != tumblrdb.OutboundSendPrepared {
-		tc.wakeOutboundSync()
 		return &bridgev2.MatrixMessageResponse{DB: outboundDatabaseMessage(persisted, nil), Pending: true}, nil
 	}
 	if pendingMeta != nil || persisted.BindingConversationID != "" ||
@@ -1034,7 +1033,6 @@ func (tc *TumblrClient) sendMatrixMessageToTumblr(ctx context.Context, msg *brid
 				log.Warn().Err(errors.Join(rejectedErr, finishErr)).Msg("Tumblr message rejection will finish asynchronously")
 			}
 		}
-		tc.wakeOutboundSync()
 		return &bridgev2.MatrixMessageResponse{Pending: true}, nil
 	}
 
@@ -1079,7 +1077,6 @@ func (tc *TumblrClient) sendMatrixMessageToTumblr(ctx context.Context, msg *brid
 			}
 		}
 	}
-	tc.wakeOutboundSync()
 	return &bridgev2.MatrixMessageResponse{
 		DB:      dbMessage,
 		Pending: true,
@@ -1175,10 +1172,8 @@ func (tc *TumblrClient) pendingAfterPreparedOwnershipLoss(
 	}
 	if current == nil || current.IsTerminal() {
 		tc.dropOutboundPending(send.TransactionID, true)
-		tc.wakeOutboundSync()
 		return &bridgev2.MatrixMessageResponse{Pending: true}, nil
 	}
-	tc.wakeOutboundSync()
 	return &bridgev2.MatrixMessageResponse{DB: outboundDatabaseMessage(current, nil), Pending: true}, nil
 }
 
@@ -1249,7 +1244,6 @@ func (tc *TumblrClient) keepOutboundPendingAfterSubmit(
 	if log := tc.log(); log != nil {
 		log.Warn().Err(errors.Join(cause, markErr)).Msg("Tumblr message outcome needs durable local reconciliation")
 	}
-	tc.wakeOutboundSync()
 	return &bridgev2.MatrixMessageResponse{DB: dbMessage, Pending: true}, nil
 }
 
@@ -1263,7 +1257,6 @@ func (tc *TumblrClient) keepOutboundVisibleAfterRoomReplacement(
 			log.Warn().Err(parkErr).Msg("Failed to terminalize a Tumblr send after its source room was replaced")
 		}
 		tc.wakeInboundSync()
-		tc.wakeOutboundSync()
 		return &bridgev2.MatrixMessageResponse{Pending: true}, nil
 	}
 	if notifyErr := tc.finishOutboundUnconfirmed(ctx, send); notifyErr != nil {
@@ -1272,7 +1265,6 @@ func (tc *TumblrClient) keepOutboundVisibleAfterRoomReplacement(
 		}
 	}
 	tc.wakeInboundSync()
-	tc.wakeOutboundSync()
 	return &bridgev2.MatrixMessageResponse{Pending: true}, nil
 }
 
