@@ -152,8 +152,12 @@ func (tc *TumblrClient) resyncDMBlock(portal *bridgev2.Portal) {
 }
 
 func (tc *TumblrClient) blockedBlogUUIDs(ctx context.Context, client *tumblr.Client, owner string, fresh bool) (map[string]bool, error) {
-	tc.dmBlockListLock.Lock()
-	defer tc.dmBlockListLock.Unlock()
+	select {
+	case tc.dmBlockListSem <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	defer func() { <-tc.dmBlockListSem }()
 	revision := tc.dmBlockRevision.Load()
 	if !fresh && tc.dmBlockList != nil && tc.dmBlockListRevision == revision && time.Since(tc.dmBlockListTime) < time.Hour {
 		return tc.dmBlockList, nil
