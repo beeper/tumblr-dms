@@ -539,6 +539,7 @@ func (tc *TumblrClient) prepareConversationDelivery(
 	fallbackTimestamp := time.Now()
 	messages, err := tc.messagesForConversationSync(ctx, portalKey, conversation, firstSeen, forceChatResync, newMessages)
 	if err != nil {
+		tc.forgetSeenConversation(conversation.ID)
 		return nil, err
 	}
 	var readReceipt *simplevent.Receipt
@@ -550,8 +551,9 @@ func (tc *TumblrClient) prepareConversationDelivery(
 		ctx,
 		portalKey,
 		conversation,
-		forceChatResync || firstSeen,
+		firstSeen,
 	); err != nil {
+		tc.forgetSeenConversation(conversation.ID)
 		return nil, err
 	}
 	return &conversationDelivery{
@@ -625,10 +627,13 @@ func (tc *TumblrClient) ensureConversationPortalForSync(
 			}
 			return tc.confirmTumblrPortalExists(mutationCtx, portalKey)
 		}
-		if !forceResync && !metadataChanged {
+		info := tc.chatInfoFromConversation(conversation)
+		nameApplied := info.Name == nil || (portal.NameSet && portal.Name == *info.Name)
+		avatarApplied := info.Avatar == nil || (portal.AvatarSet && portal.AvatarMXC != "" && portal.AvatarID == info.Avatar.ID)
+		if !forceResync && !metadataChanged && nameApplied && avatarApplied {
 			return nil
 		}
-		portal.UpdateInfo(mutationCtx, tc.chatInfoFromConversation(conversation), tc.userLogin, nil, time.Time{})
+		portal.UpdateInfo(mutationCtx, info, tc.userLogin, nil, time.Time{})
 		if err = mutationCtx.Err(); err != nil {
 			return fmt.Errorf("timed out updating Tumblr conversation room: %w", err)
 		}
@@ -784,6 +789,12 @@ func (tc *TumblrClient) markConversationSeen(conversation tumblr.Conversation) (
 		newMessages = append(newMessages, message)
 	}
 	return
+}
+
+func (tc *TumblrClient) forgetSeenConversation(conversationID string) {
+	tc.seenLock.Lock()
+	defer tc.seenLock.Unlock()
+	delete(tc.seenConversations, conversationID)
 }
 
 func (tc *TumblrClient) readReceiptAlreadyBridged(conversation tumblr.Conversation) bool {
