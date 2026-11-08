@@ -625,7 +625,9 @@ func (tc *TumblrClient) ensureConversationPortalForSync(
 			return tc.confirmTumblrPortalExists(mutationCtx, portalKey)
 		}
 		info := tc.chatInfoFromConversation(conversation)
-		if !forceResync && !metadataChanged && (info.Name == nil || portal.NameSet) && (info.Avatar == nil || portal.AvatarSet) {
+		nameApplied := info.Name == nil || (portal.NameSet && portal.Name == *info.Name)
+		avatarApplied := info.Avatar == nil || (portal.AvatarSet && portal.AvatarMXC != "" && portal.AvatarID == info.Avatar.ID)
+		if !forceResync && !metadataChanged && nameApplied && avatarApplied {
 			return nil
 		}
 		portal.UpdateInfo(mutationCtx, info, tc.userLogin, nil, time.Time{})
