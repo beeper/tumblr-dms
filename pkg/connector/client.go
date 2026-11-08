@@ -421,7 +421,7 @@ func (tc *TumblrClient) runConnectionGeneration(generation *connectionGeneration
 	var userInfo *tumblr.UserInfoResponse
 	for attempt := 0; ; attempt++ {
 		var unexpectedCode status.BridgeStateErrorCode = "tumblr-bootstrap-failed"
-		err = client.Bootstrap(ctx)
+		err = client.BootstrapIfNeeded(ctx)
 		if err == nil {
 			unexpectedCode = "tumblr-current-user-failed"
 			userInfo, err = client.CurrentUser(ctx)
@@ -477,7 +477,7 @@ func (tc *TumblrClient) runConnectionGeneration(generation *connectionGeneration
 	if !tc.isCurrentGeneration(generation) {
 		return
 	}
-	if metadataErr := tc.applySelectedBlog(userInfo, blog); metadataErr != nil {
+	if metadataErr := tc.applySelectedBlog(client, userInfo, blog); metadataErr != nil {
 		tc.failGeneration(generation, tumblrBadCredentialsStateWithCode("tumblr-invalid-login-metadata", metadataErr))
 		return
 	}
@@ -491,13 +491,15 @@ func (tc *TumblrClient) runConnectionGeneration(generation *connectionGeneration
 	tc.startOutboundSync(generation)
 }
 
-func (tc *TumblrClient) applySelectedBlog(userInfo *tumblr.UserInfoResponse, blog *tumblr.Blog) error {
+func (tc *TumblrClient) applySelectedBlog(client *tumblr.Client, userInfo *tumblr.UserInfoResponse, blog *tumblr.Blog) error {
 	tc.loginMetadataLock.Lock()
 	defer tc.loginMetadataLock.Unlock()
 	liveMeta, err := tc.validatedLoginMetadataLocked()
 	if err != nil {
 		return err
 	}
+	liveMeta.APIToken = client.APIToken()
+	liveMeta.CSRFToken = client.CSRFToken()
 	liveMeta.UserName = userName(userInfo, blog)
 	liveMeta.SelectedBlogName = blog.Name
 	liveMeta.SelectedBlogUUID = blog.UUID
@@ -531,7 +533,7 @@ func (tc *TumblrClient) refreshRenamedSelectedBlog(ctx context.Context, client *
 		return false, errTumblrClientRetired
 	}
 	defer tc.endOwnedOperation()
-	if err = tc.applySelectedBlog(userInfo, blog); err != nil {
+	if err = tc.applySelectedBlog(client, userInfo, blog); err != nil {
 		return false, err
 	}
 	if err = tc.saveOwnedUserLogin(ctx); err != nil {

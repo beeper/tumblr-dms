@@ -471,6 +471,10 @@ func (c *Client) Bootstrap(ctx context.Context) error {
 	return c.bootstrap(ctx)
 }
 
+func (c *Client) BootstrapIfNeeded(ctx context.Context) error {
+	return c.bootstrapIfNeeded(ctx, false)
+}
+
 func (c *Client) bootstrapIfNeeded(ctx context.Context, mutating bool) error {
 	c.authRefreshMu.Lock()
 	defer c.authRefreshMu.Unlock()
