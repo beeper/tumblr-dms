@@ -3,10 +3,13 @@ package connector
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"net/http"
 	"net/url"
 	"strings"
 
+	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
@@ -89,7 +92,21 @@ func (tc *TumblrConnector) Download(ctx context.Context, mediaID networkid.Media
 		return nil, err
 	}
 	image, err := tc.directMediaClient.DownloadImage(ctx, rawURL, tc.maxFileSize.Load())
-	if err != nil {
+	var downloadErr *tumblr.MediaDownloadError
+	if errors.As(err, &downloadErr) {
+		switch {
+		case downloadErr.StatusCode == http.StatusNotFound || downloadErr.StatusCode == http.StatusGone:
+			return nil, mautrix.MNotFound.WithMessage("Image is no longer available on Tumblr")
+		case downloadErr.StatusCode == http.StatusUnauthorized || downloadErr.StatusCode == http.StatusForbidden:
+			return nil, mautrix.MForbidden.WithMessage("Tumblr denied access to the image")
+		case downloadErr.StatusCode == http.StatusTooManyRequests:
+			return nil, mautrix.MLimitExceeded.WithMessage("Rate limited by Tumblr while fetching the image").WithCanRetry(true)
+		case downloadErr.Failure == tumblr.MediaDownloadTransient:
+			return nil, mautrix.MUnknown.WithMessage("Failed to fetch image from Tumblr: %s", downloadErr).WithStatus(http.StatusBadGateway).WithCanRetry(true)
+		default:
+			return nil, mautrix.MNotFound.WithMessage("Tumblr image can't be served: %s", downloadErr)
+		}
+	} else if err != nil {
 		return nil, err
 	}
 	return &mediaproxy.GetMediaResponseData{
