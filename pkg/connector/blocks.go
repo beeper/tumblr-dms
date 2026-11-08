@@ -110,7 +110,7 @@ func (tc *TumblrClient) resyncDMBlock(portal *bridgev2.Portal) {
 			if time.Now().UnixNano() < tc.dmBlockRetryAfter.Load() {
 				return nil, nil
 			}
-			blockedBlogs, err := tc.blockedBlogUUIDs(ctx, client, owner)
+			blockedBlogs, err := tc.blockedBlogUUIDs(ctx, client, owner, false)
 			if err != nil {
 				if ctx.Err() == nil {
 					retryAfter := time.Now().Add(30 * time.Second).UnixNano()
@@ -151,11 +151,11 @@ func (tc *TumblrClient) resyncDMBlock(portal *bridgev2.Portal) {
 	}()
 }
 
-func (tc *TumblrClient) blockedBlogUUIDs(ctx context.Context, client *tumblr.Client, owner string) (map[string]bool, error) {
+func (tc *TumblrClient) blockedBlogUUIDs(ctx context.Context, client *tumblr.Client, owner string, fresh bool) (map[string]bool, error) {
 	tc.dmBlockListLock.Lock()
 	defer tc.dmBlockListLock.Unlock()
 	revision := tc.dmBlockRevision.Load()
-	if tc.dmBlockList != nil && tc.dmBlockListRevision == revision && time.Since(tc.dmBlockListTime) < time.Hour {
+	if !fresh && tc.dmBlockList != nil && tc.dmBlockListRevision == revision && time.Since(tc.dmBlockListTime) < time.Hour {
 		return tc.dmBlockList, nil
 	}
 	blogs, err := client.ListBlockedBlogs(ctx, owner)
