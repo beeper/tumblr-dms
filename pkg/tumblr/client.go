@@ -713,10 +713,9 @@ func (c *Client) CurrentUser(ctx context.Context) (*UserInfoResponse, error) {
 func (c *Client) Logout(ctx context.Context) error {
 	err := c.bootstrapIfNeeded(ctx, true)
 	if err == nil {
+		previousCSRF := c.CSRFToken()
 		err = c.doOnce(ctx, http.MethodDelete, "/v2/user/session", nil, nil, nil)
-	}
-	if IsForbidden(err) {
-		if err = c.Bootstrap(ctx); err == nil {
+		if currentCSRF := c.CSRFToken(); loginHasErrorCode(err, 1023) && currentCSRF != "" && currentCSRF != previousCSRF {
 			err = c.doOnce(ctx, http.MethodDelete, "/v2/user/session", nil, nil, nil)
 		}
 	}
