@@ -1806,7 +1806,7 @@ func (tc *TumblrClient) outboundBaseline(ctx context.Context, client *tumblr.Cli
 	if conversationID == "" {
 		return []networkid.MessageID{}, nil
 	}
-	resp, err := client.GetConversation(ctx, selectedBlogName, conversationID, tumblr.MaxMessagesPageSize)
+	resp, err := client.GetConversation(ctx, selectedBlogName, conversationID, tumblr.MaxRequestLimit)
 	if err != nil {
 		return nil, tc.handleRemoteError(err)
 	}
