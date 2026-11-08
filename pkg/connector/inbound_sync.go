@@ -509,7 +509,7 @@ func (tc *TumblrClient) reconcileConversationHead(ctx context.Context) error {
 			if previousWatermark > 0 && conversation.LastModifiedTimestamp > 0 && conversation.LastModifiedTimestamp < previousWatermark {
 				continue
 			}
-			if err = tc.putLiveConversationJob(ctx, conversation.ID); err != nil {
+			if _, err = tc.queueChangedConversationHead(ctx, conversation.ID, conversationPageHeadMessageID(conversation.Messages.Data)); err != nil {
 				return err
 			}
 		}
