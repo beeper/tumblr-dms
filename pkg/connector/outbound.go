@@ -134,6 +134,36 @@ func closestOutboundCandidateMatches(
 			edges = append(edges, candidateEdge{txnID: set.send.TransactionID, messageID: messageID, distance: distance})
 		}
 	}
+	parent := make(map[string]string)
+	var find func(string) string
+	find = func(node string) string {
+		if parent[node] == "" || parent[node] == node {
+			parent[node] = node
+			return node
+		}
+		parent[node] = find(parent[node])
+		return parent[node]
+	}
+	for _, edge := range edges {
+		parent[find("s:"+string(edge.txnID))] = find("m:" + edge.messageID)
+	}
+	componentSends := make(map[string]int)
+	componentMessages := make(map[string]int)
+	for node := range parent {
+		if strings.HasPrefix(node, "s:") {
+			componentSends[find(node)]++
+		} else {
+			componentMessages[find(node)]++
+		}
+	}
+	explained := edges[:0]
+	for _, edge := range edges {
+		root := find("m:" + edge.messageID)
+		if componentMessages[root] <= componentSends[root] {
+			explained = append(explained, edge)
+		}
+	}
+	edges = explained
 	sort.Slice(edges, func(i, j int) bool {
 		if edges[i].distance != edges[j].distance {
 			return edges[i].distance < edges[j].distance
