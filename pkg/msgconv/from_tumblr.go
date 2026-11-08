@@ -51,8 +51,7 @@ func ConvertTumblrMessage(message tumblr.Message) *bridgev2.ConvertedMessage {
 			body = message.Content.Text
 		}
 	case tumblr.MessageTypePostRef:
-		msgType = event.MsgNotice
-		body = noticePostBody(message.Post)
+		body = postRefBody(message.Post)
 	case tumblr.MessageTypeImage:
 		msgType = event.MsgNotice
 		body = "Tumblr image message"
@@ -107,7 +106,7 @@ func cleanMessageBody(body string) string {
 	return string(runes[:maxTextLength-len(truncation)]) + displayNameTruncation
 }
 
-func noticePostSummary(summary string) string {
+func postRefSummary(summary string) string {
 	fields := strings.FieldsFunc(summary, func(r rune) bool {
 		return unicode.IsSpace(r) || unicode.IsControl(r)
 	})
@@ -122,14 +121,14 @@ func noticePostSummary(summary string) string {
 	return string(runes[:maxPostSummaryRunes]) + displayNameTruncation
 }
 
-func noticePostBody(post *tumblr.PostRef) string {
+func postRefBody(post *tumblr.PostRef) string {
 	if post == nil {
 		return "Tumblr post"
 	}
 	if post.IsUnavailable() {
 		return "Tumblr post is no longer available"
 	}
-	summary := noticePostSummary(post.Summary)
+	summary := postRefSummary(post.Summary)
 	postURL := strings.TrimSpace(post.BestURL())
 	switch {
 	case summary != "" && postURL != "":
