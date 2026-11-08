@@ -138,6 +138,21 @@ func stopConnectionGeneration(generation *connectionGeneration) {
 	generation.wg.Wait()
 }
 
+func (tc *TumblrClient) generationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(ctx)
+	tc.generationLock.Lock()
+	generation := tc.generation
+	tc.generationLock.Unlock()
+	if generation == nil {
+		return ctx, cancel
+	}
+	stop := context.AfterFunc(generation.ctx, cancel)
+	return ctx, func() {
+		stop()
+		cancel()
+	}
+}
+
 func (tc *TumblrClient) isCurrentGeneration(generation *connectionGeneration) bool {
 	if tc == nil || generation == nil || !tc.isActiveClient() {
 		return false

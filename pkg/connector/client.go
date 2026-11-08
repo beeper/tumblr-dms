@@ -1009,25 +1009,27 @@ func (tc *TumblrClient) sendMatrixMessageToTumblr(ctx context.Context, msg *brid
 	dbMessage := tc.registerOutboundPending(msg, persisted)
 
 	var resp *tumblr.SendMessageResponse
+	postCtx, cancelPost := tc.generationContext(ctx)
 	if conversationID == "" {
 		switch messageType {
 		case tumblr.MessageTypeImage:
-			resp, err = client.SendImageToParticipants(ctx, meta.SelectedBlogUUID, pendingMeta.PendingParticipantIDs, image)
+			resp, err = client.SendImageToParticipants(postCtx, meta.SelectedBlogUUID, pendingMeta.PendingParticipantIDs, image)
 		case tumblr.MessageTypePostRef:
-			resp, err = client.SendPostRefToParticipants(ctx, meta.SelectedBlogUUID, pendingMeta.PendingParticipantIDs, *post)
+			resp, err = client.SendPostRefToParticipants(postCtx, meta.SelectedBlogUUID, pendingMeta.PendingParticipantIDs, *post)
 		default:
-			resp, err = client.SendTextToParticipants(ctx, meta.SelectedBlogUUID, pendingMeta.PendingParticipantIDs, text)
+			resp, err = client.SendTextToParticipants(postCtx, meta.SelectedBlogUUID, pendingMeta.PendingParticipantIDs, text)
 		}
 	} else {
 		switch messageType {
 		case tumblr.MessageTypeImage:
-			resp, err = client.SendImage(ctx, meta.SelectedBlogUUID, conversationID, image)
+			resp, err = client.SendImage(postCtx, meta.SelectedBlogUUID, conversationID, image)
 		case tumblr.MessageTypePostRef:
-			resp, err = client.SendPostRef(ctx, meta.SelectedBlogUUID, conversationID, *post)
+			resp, err = client.SendPostRef(postCtx, meta.SelectedBlogUUID, conversationID, *post)
 		default:
-			resp, err = client.SendText(ctx, meta.SelectedBlogUUID, conversationID, text)
+			resp, err = client.SendText(postCtx, meta.SelectedBlogUUID, conversationID, text)
 		}
 	}
+	cancelPost()
 	if err != nil {
 		if tumblr.IsMessageSendOutcomeUnknown(err) {
 			return tc.keepOutboundPendingAfterSubmit(ctx, persisted, dbMessage, err)

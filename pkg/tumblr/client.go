@@ -32,8 +32,7 @@ const (
 	defaultUserAgent        = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36"
 	DefaultMaxUploadBytes   = 20 * 1024 * 1024
 	MaxGIFUploadBytes       = 10 * 1024 * 1024
-	MaxUploadPixels         = 43_500_000
-	MaxUploadSide           = 6595
+	MaxUploadPixels         = 43_546_801
 	messageUploadTimeout    = 5 * time.Minute
 	DefaultMaxDownloadBytes = 50 * 1024 * 1024
 	maxBootstrapPageBytes   = 4 * 1024 * 1024

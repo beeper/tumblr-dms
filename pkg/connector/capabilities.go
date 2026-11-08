@@ -32,10 +32,8 @@ var roomCaps = event.RoomFeatures{
 				"image/webp": event.CapLevelFullySupported,
 				"image/gif":  event.CapLevelPartialSupport,
 			},
-			Caption:   event.CapLevelDropped,
-			MaxSize:   tumblr.DefaultMaxUploadBytes,
-			MaxWidth:  tumblr.MaxUploadSide,
-			MaxHeight: tumblr.MaxUploadSide,
+			Caption: event.CapLevelDropped,
+			MaxSize: tumblr.DefaultMaxUploadBytes,
 		},
 		event.CapMsgSticker: {
 			MimeTypes: map[string]event.CapabilitySupportLevel{
@@ -44,10 +42,8 @@ var roomCaps = event.RoomFeatures{
 				"image/webp": event.CapLevelPartialSupport,
 				"image/gif":  event.CapLevelPartialSupport,
 			},
-			Caption:   event.CapLevelDropped,
-			MaxSize:   tumblr.DefaultMaxUploadBytes,
-			MaxWidth:  tumblr.MaxUploadSide,
-			MaxHeight: tumblr.MaxUploadSide,
+			Caption: event.CapLevelDropped,
+			MaxSize: tumblr.DefaultMaxUploadBytes,
 		},
 		event.CapMsgGIF: {
 			MimeTypes: map[string]event.CapabilitySupportLevel{
