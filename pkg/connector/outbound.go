@@ -62,8 +62,9 @@ type outboundCandidateSet struct {
 }
 
 type outboundReconciliationResult struct {
-	transactions   map[string]networkid.TransactionID
-	heldMessageIDs map[string]struct{}
+	transactions    map[string]networkid.TransactionID
+	heldMessageIDs  map[string]struct{}
+	unverifiedSends map[networkid.TransactionID]struct{}
 }
 
 // forcedOutboundCandidateMatches maximizes how many eligible remote echoes are
@@ -86,6 +87,102 @@ func forcedOutboundCandidateMatches(sets []outboundCandidateSet) map[networkid.T
 		}
 	}
 	return forced
+}
+
+func closestOutboundCandidateMatches(
+	sets []outboundCandidateSet,
+	forced map[networkid.TransactionID]string,
+	messages []tumblr.Message,
+) map[networkid.TransactionID]string {
+	taken := make(map[string]struct{}, len(forced))
+	for _, messageID := range forced {
+		taken[messageID] = struct{}{}
+	}
+	contentByMessage := make(map[string]tumblrdb.OutboundContentHash)
+	mixedContent := make(map[string]struct{})
+	for _, set := range sets {
+		for _, messageID := range set.messageIDs {
+			if hash, seen := contentByMessage[messageID]; seen && hash != set.send.ContentHash {
+				mixedContent[messageID] = struct{}{}
+			}
+			contentByMessage[messageID] = set.send.ContentHash
+		}
+	}
+	type candidateEdge struct {
+		txnID     networkid.TransactionID
+		messageID string
+		distance  time.Duration
+	}
+	edges := make([]candidateEdge, 0)
+	for _, set := range sets {
+		if _, done := forced[set.send.TransactionID]; done {
+			continue
+		}
+		for _, messageID := range set.messageIDs {
+			_, used := taken[messageID]
+			_, mixed := mixedContent[messageID]
+			message := findConversationMessage(messages, messageID)
+			if used || mixed || message == nil {
+				continue
+			}
+			distance := tumblrTimestamp(message.Timestamp).Sub(set.send.SendStartedAt)
+			if distance < 0 {
+				distance = -distance
+			}
+			edges = append(edges, candidateEdge{txnID: set.send.TransactionID, messageID: messageID, distance: distance})
+		}
+	}
+	parent := make(map[string]string)
+	var find func(string) string
+	find = func(node string) string {
+		if parent[node] == "" || parent[node] == node {
+			parent[node] = node
+			return node
+		}
+		parent[node] = find(parent[node])
+		return parent[node]
+	}
+	for _, edge := range edges {
+		parent[find("s:"+string(edge.txnID))] = find("m:" + edge.messageID)
+	}
+	componentSends := make(map[string]int)
+	componentMessages := make(map[string]int)
+	for node := range parent {
+		if strings.HasPrefix(node, "s:") {
+			componentSends[find(node)]++
+		} else {
+			componentMessages[find(node)]++
+		}
+	}
+	explained := edges[:0]
+	for _, edge := range edges {
+		root := find("m:" + edge.messageID)
+		if componentMessages[root] <= componentSends[root] {
+			explained = append(explained, edge)
+		}
+	}
+	edges = explained
+	sort.Slice(edges, func(i, j int) bool {
+		if edges[i].distance != edges[j].distance {
+			return edges[i].distance < edges[j].distance
+		}
+		if edges[i].txnID != edges[j].txnID {
+			return edges[i].txnID < edges[j].txnID
+		}
+		return edges[i].messageID < edges[j].messageID
+	})
+	matches := make(map[networkid.TransactionID]string)
+	for _, edge := range edges {
+		if _, used := taken[edge.messageID]; used {
+			continue
+		}
+		if _, done := matches[edge.txnID]; done {
+			continue
+		}
+		matches[edge.txnID] = edge.messageID
+		taken[edge.messageID] = struct{}{}
+	}
+	return matches
 }
 
 func maximumOutboundCandidateMatching(
@@ -672,8 +769,14 @@ func (tc *TumblrClient) finishDueOutboundSend(
 		}
 		return nil
 	}
+	var held *outboundReconciliationDeferredError
 	if syncErr != nil {
-		return tc.deferOutboundRecovery(ctx, reloaded, syncErr)
+		if !errors.As(syncErr, &held) {
+			return tc.deferOutboundRecovery(ctx, reloaded, syncErr)
+		}
+		if _, unverified := held.unverifiedSends[reloaded.TransactionID]; unverified {
+			return tc.deferOutboundRecovery(ctx, reloaded, syncErr)
+		}
 	}
 	if err := tc.markOutboundUnconfirmed(ctx, reloaded); err != nil {
 		return err
@@ -1294,8 +1397,9 @@ func (tc *TumblrClient) outboundPortalMatchesConversation(portalKey networkid.Po
 
 func (tc *TumblrClient) reconcileOutboundConversation(ctx context.Context, conversation *tumblr.Conversation) (outboundReconciliationResult, error) {
 	result := outboundReconciliationResult{
-		transactions:   make(map[string]networkid.TransactionID),
-		heldMessageIDs: make(map[string]struct{}),
+		transactions:    make(map[string]networkid.TransactionID),
+		heldMessageIDs:  make(map[string]struct{}),
+		unverifiedSends: make(map[networkid.TransactionID]struct{}),
 	}
 	if conversation == nil || tc == nil || tc.connector == nil || tc.connector.DB == nil || tc.userLogin == nil {
 		return result, nil
@@ -1354,6 +1458,8 @@ func (tc *TumblrClient) reconcileOutboundConversation(ctx context.Context, conve
 	sets := make([]outboundCandidateSet, 0, len(matchable))
 	blockedSends := make(map[networkid.TransactionID]struct{})
 	blockedMessages := make(map[string]struct{})
+	transientMessages := make(map[string]struct{})
+	unverifiedMessages := make(map[networkid.TransactionID][]string)
 	for _, send := range matchable {
 		set := outboundCandidateSet{send: send}
 		structuralImages := make([]*tumblr.Message, 0)
@@ -1380,6 +1486,10 @@ func (tc *TumblrClient) reconcileOutboundConversation(ctx context.Context, conve
 			for _, message := range structuralImages {
 				candidate, matchErr := tc.outboundMessageCandidate(ctx, send, message, true)
 				if matchErr != nil || candidate.indeterminate {
+					if matchErr != nil {
+						transientMessages[message.ID] = struct{}{}
+					}
+					unverifiedMessages[send.TransactionID] = append(unverifiedMessages[send.TransactionID], message.ID)
 					quarantine[message.ID] = struct{}{}
 					blockedSends[send.TransactionID] = struct{}{}
 					blockedMessages[message.ID] = struct{}{}
@@ -1416,6 +1526,13 @@ func (tc *TumblrClient) reconcileOutboundConversation(ctx context.Context, conve
 			}
 		}
 	}
+	for _, set := range sets {
+		for _, messageID := range append(unverifiedMessages[set.send.TransactionID], set.messageIDs...) {
+			if _, transient := transientMessages[messageID]; transient {
+				result.unverifiedSends[set.send.TransactionID] = struct{}{}
+			}
+		}
+	}
 	eligibleSets := make([]outboundCandidateSet, 0, len(sets))
 	for _, set := range sets {
 		if _, blocked := blockedSends[set.send.TransactionID]; !blocked {
@@ -1423,6 +1540,9 @@ func (tc *TumblrClient) reconcileOutboundConversation(ctx context.Context, conve
 		}
 	}
 	forcedMatches := forcedOutboundCandidateMatches(eligibleSets)
+	for txnID, messageID := range closestOutboundCandidateMatches(eligibleSets, forcedMatches, conversation.Messages.Data) {
+		forcedMatches[txnID] = messageID
+	}
 	for _, set := range sets {
 		messageID := forcedMatches[set.send.TransactionID]
 		if messageID == "" {
@@ -1636,11 +1756,15 @@ func (tc *TumblrClient) outboundMessageCandidate(ctx context.Context, send *tumb
 			return outboundCandidateResult{indeterminate: true}, nil
 		}
 		var lastErr error
-		sourceIdentityIndeterminate := false
+		indeterminate := false
 		// Any matching rendition proves the relation, but a mismatch is definitive
 		// only after every rendition was evaluated successfully.
 		for _, asset := range assets {
 			downloaded, downloadErr := client.DownloadImage(ctx, asset.URL, tumblr.DefaultMaxDownloadBytes)
+			if tumblr.IsPermanentMediaDownloadError(downloadErr) {
+				indeterminate = true
+				continue
+			}
 			if downloadErr != nil {
 				lastErr = downloadErr
 				continue
@@ -1650,7 +1774,7 @@ func (tc *TumblrClient) outboundMessageCandidate(ctx context.Context, send *tumb
 				case send.SourceMediaDigest:
 					return outboundCandidateResult{match: true}, nil
 				case "":
-					sourceIdentityIndeterminate = true
+					indeterminate = true
 				default:
 					// A different valid Tumblr source identity is stronger
 					// disconfirming evidence than equal rendered pixels.
@@ -1662,6 +1786,10 @@ func (tc *TumblrClient) outboundMessageCandidate(ctx context.Context, send *tumb
 				if tumblrdb.HashOutboundContent(downloaded.Data) == send.ContentHash {
 					return outboundCandidateResult{match: true}, nil
 				}
+				continue
+			}
+			if tumblr.IsPermanentMediaDownloadError(hashErr) {
+				indeterminate = true
 				continue
 			}
 			if hashErr != nil {
@@ -1676,7 +1804,7 @@ func (tc *TumblrClient) outboundMessageCandidate(ctx context.Context, send *tumb
 		if lastErr != nil {
 			return outboundCandidateResult{}, lastErr
 		}
-		if sourceIdentityIndeterminate {
+		if indeterminate {
 			return outboundCandidateResult{indeterminate: true}, nil
 		}
 		return outboundCandidateResult{}, nil
@@ -1710,30 +1838,4 @@ func findConversationMessage(messages []tumblr.Message, messageID string) *tumbl
 		}
 	}
 	return nil
-}
-
-func (tc *TumblrClient) outboundBaseline(ctx context.Context, client *tumblr.Client, selectedBlogName, conversationID string) ([]networkid.MessageID, error) {
-	if conversationID == "" {
-		return []networkid.MessageID{}, nil
-	}
-	resp, err := client.GetConversation(ctx, selectedBlogName, conversationID, tumblr.MaxRequestLimit)
-	if err != nil {
-		return nil, tc.handleRemoteError(err)
-	}
-	if err = validateConversationHistoryResponse(conversationID, resp); err != nil {
-		return nil, err
-	}
-	ids := make([]networkid.MessageID, 0, len(resp.Messages))
-	seen := make(map[string]struct{}, len(resp.Messages))
-	for _, message := range resp.Messages {
-		if !validRemoteID(message.ID) {
-			continue
-		}
-		if _, duplicate := seen[message.ID]; duplicate {
-			continue
-		}
-		seen[message.ID] = struct{}{}
-		ids = append(ids, tumblrid.MakeMessageID(message.ID))
-	}
-	return ids, nil
 }
