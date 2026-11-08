@@ -28,6 +28,7 @@ const (
 	DefaultAPIBaseURL       = "https://www.tumblr.com/api"
 	MaxMessageTextRunes     = 4096
 	MaxRequestLimit         = 100
+	MaxMessagesPageSize     = 20
 	defaultUserAgent        = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36"
 	DefaultMaxUploadBytes   = 5 * 1024 * 1024
 	DefaultMaxDownloadBytes = 50 * 1024 * 1024

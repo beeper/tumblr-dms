@@ -96,6 +96,10 @@ func (c *Config) ConversationSyncBatchLimit() int {
 	return c.ConversationSyncLimit
 }
 
+func (c *Config) ConversationHistoryPageLimit() int {
+	return min(c.ConversationSyncBatchLimit(), tumblr.MaxMessagesPageSize)
+}
+
 func (c *Config) RequestTimeout() time.Duration {
 	if c == nil {
 		return defaultRequestTimeoutSeconds * time.Second

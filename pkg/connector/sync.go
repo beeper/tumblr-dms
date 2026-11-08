@@ -79,9 +79,9 @@ func (tc *TumblrClient) syncConversationByIDWithSubmissionLock(
 	if err != nil {
 		return nil, err
 	}
-	limit := defaultConversationSyncLimit
+	limit := tumblr.MaxMessagesPageSize
 	if tc.connector != nil {
-		limit = tc.connector.Config.ConversationSyncBatchLimit()
+		limit = tc.connector.Config.ConversationHistoryPageLimit()
 	}
 	client, err := tc.tumblrClient()
 	if err != nil {
