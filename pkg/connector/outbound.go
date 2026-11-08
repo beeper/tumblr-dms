@@ -617,7 +617,7 @@ func (tc *TumblrClient) finishOutboundNotSubmitted(ctx context.Context, send *tu
 	if cause != nil {
 		messageStatus = tc.tumblrMatrixErrorStatus(cause, outboundNotSubmittedMessage).WithIsCertain(true)
 	}
-	if err := tc.notifyOutboundStatusAtLeastOnce(ctx, send, messageStatus); err != nil {
+	if err := tc.notifyOutboundStatusOnce(ctx, send, messageStatus); err != nil {
 		return tc.deferOutboundRecovery(ctx, send, err)
 	}
 	tc.dropOutboundPending(send.TransactionID, true)
@@ -628,7 +628,7 @@ func (tc *TumblrClient) finishOutboundUnconfirmed(ctx context.Context, send *tum
 	messageStatus := bridgev2.WrapErrorInStatus(errOutboundUnconfirmed).
 		WithMessage(outboundUnconfirmedMessage).
 		WithSendNotice(true)
-	if err := tc.notifyOutboundStatusAtLeastOnce(ctx, send, messageStatus); err != nil {
+	if err := tc.notifyOutboundStatusOnce(ctx, send, messageStatus); err != nil {
 		return tc.deferOutboundRecovery(ctx, send, err)
 	}
 	tc.dropOutboundPending(send.TransactionID, true)
@@ -692,7 +692,7 @@ func (tc *TumblrClient) markOutboundUnconfirmed(ctx context.Context, send *tumbl
 	return tc.finishOutboundUnconfirmed(ctx, send)
 }
 
-func (tc *TumblrClient) notifyOutboundStatusAtLeastOnce(ctx context.Context, send *tumblrdb.OutboundSend, messageStatus bridgev2.MessageStatus) error {
+func (tc *TumblrClient) notifyOutboundStatusOnce(ctx context.Context, send *tumblrdb.OutboundSend, messageStatus bridgev2.MessageStatus) error {
 	if send == nil {
 		return fmt.Errorf("tumblr outbound send is required")
 	}
@@ -703,27 +703,15 @@ func (tc *TumblrClient) notifyOutboundStatusAtLeastOnce(ctx context.Context, sen
 	if err != nil {
 		return err
 	}
-	claimExpiresAt := time.Now().Add(outboundStatusClaimTTL)
 	claimed, err := tc.connector.DB.Outbound.ClaimStatusDelivery(
 		ctx,
 		send.UserLoginID,
 		send.TransactionID,
 		claimToken,
-		claimExpiresAt,
+		time.Now().Add(outboundStatusClaimTTL),
 	)
-	if err != nil {
+	if err != nil || !claimed {
 		return err
-	}
-	if !claimed {
-		return nil
-	}
-	send.StatusClaimToken = claimToken
-	send.StatusClaimExpiresAt = claimExpiresAt
-	if err := tc.sendOutboundStatus(ctx, send, &messageStatus); err != nil {
-		releaseErr := tc.connector.DB.Outbound.ReleaseStatusDelivery(ctx, send.UserLoginID, send.TransactionID, claimToken)
-		send.StatusClaimToken = ""
-		send.StatusClaimExpiresAt = time.Time{}
-		return errors.Join(err, releaseErr)
 	}
 	notifiedAt := time.Now()
 	expiresAt := notifiedAt.Add(outboundTerminalRetention)
@@ -740,9 +728,7 @@ func (tc *TumblrClient) notifyOutboundStatusAtLeastOnce(ctx context.Context, sen
 	}
 	send.NextAttemptAt = expiresAt
 	send.StatusNotifiedAt = notifiedAt
-	send.StatusClaimToken = ""
-	send.StatusClaimExpiresAt = time.Time{}
-	return nil
+	return tc.sendOutboundStatus(ctx, send, &messageStatus)
 }
 
 func (tc *TumblrClient) parkOutboundUnconfirmed(ctx context.Context, send *tumblrdb.OutboundSend, now time.Time) error {
