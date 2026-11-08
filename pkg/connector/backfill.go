@@ -114,9 +114,9 @@ func validateConversationHistoryResponse(conversationID string, resp *tumblr.Con
 }
 
 func (tc *TumblrClient) backfillLimit(requested int) int {
-	limit := defaultConversationSyncLimit
+	limit := tumblr.MaxMessagesPageSize
 	if tc != nil && tc.connector != nil {
-		limit = tc.connector.Config.ConversationSyncBatchLimit()
+		limit = tc.connector.Config.ConversationHistoryPageLimit()
 	}
 	if requested <= 0 || requested > limit {
 		return limit

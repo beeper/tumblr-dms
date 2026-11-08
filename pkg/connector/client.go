@@ -29,10 +29,15 @@ type TumblrClient struct {
 	dmBlockResyncInFlight sync.Map
 	dmBlockRetryAfter     atomic.Int64
 	dmBlockRevision       atomic.Uint64
+	dmBlockListSem        chan struct{}
+	dmBlockList           map[string]bool
+	dmBlockListTime       time.Time
+	dmBlockListRevision   uint64
 
 	connector          *TumblrConnector
 	userLogin          *bridgev2.UserLogin
 	client             *tumblr.Client
+	selectedBlog       atomic.Pointer[tumblr.Blog]
 	loggedIn           atomic.Bool
 	stateLock          sync.Mutex
 	ownershipLock      sync.Mutex
@@ -117,6 +122,7 @@ func NewTumblrClient(login *bridgev2.UserLogin, connector *TumblrConnector, clie
 		bridgedReadTimestamps:      make(map[string]int64),
 		seenMessages:               make(map[string]struct{}),
 		outboundPending:            make(map[networkid.TransactionID]*outboundPendingRegistration),
+		dmBlockListSem:             make(chan struct{}, 1),
 	}
 }
 
@@ -421,10 +427,10 @@ func (tc *TumblrClient) runConnectionGeneration(generation *connectionGeneration
 	var userInfo *tumblr.UserInfoResponse
 	for attempt := 0; ; attempt++ {
 		var unexpectedCode status.BridgeStateErrorCode = "tumblr-bootstrap-failed"
-		err = client.Bootstrap(ctx)
+		err = client.BootstrapIfNeeded(ctx)
 		if err == nil {
 			unexpectedCode = "tumblr-current-user-failed"
-			userInfo, err = client.CurrentUser(ctx)
+			userInfo, err = client.CurrentUser(tumblr.WithSingleAuthRefresh(ctx))
 		}
 		if err == nil {
 			if _, blogErr := selectedBlogFromCurrentUser(userInfo, meta); errors.Is(blogErr, errSelectedBlogCannotMessage) {
@@ -477,10 +483,11 @@ func (tc *TumblrClient) runConnectionGeneration(generation *connectionGeneration
 	if !tc.isCurrentGeneration(generation) {
 		return
 	}
-	if metadataErr := tc.applySelectedBlog(userInfo, blog); metadataErr != nil {
+	if metadataErr := tc.applySelectedBlog(client, userInfo, blog); metadataErr != nil {
 		tc.failGeneration(generation, tumblrBadCredentialsStateWithCode("tumblr-invalid-login-metadata", metadataErr))
 		return
 	}
+	tc.updateOwnGhost(ctx)
 	if err := tc.saveOwnedUserLogin(ctx); err != nil {
 		if log := tc.log(); log != nil {
 			log.Warn().Err(err).Msg("Failed to save refreshed Tumblr account")
@@ -491,24 +498,46 @@ func (tc *TumblrClient) runConnectionGeneration(generation *connectionGeneration
 	tc.startOutboundSync(generation)
 }
 
-func (tc *TumblrClient) applySelectedBlog(userInfo *tumblr.UserInfoResponse, blog *tumblr.Blog) error {
+func (tc *TumblrClient) applySelectedBlog(client *tumblr.Client, userInfo *tumblr.UserInfoResponse, blog *tumblr.Blog) error {
 	tc.loginMetadataLock.Lock()
 	defer tc.loginMetadataLock.Unlock()
 	liveMeta, err := tc.validatedLoginMetadataLocked()
 	if err != nil {
 		return err
 	}
+	liveMeta.APIToken = client.APIToken()
+	liveMeta.CSRFToken = client.CSRFToken()
 	liveMeta.UserName = userName(userInfo, blog)
 	liveMeta.SelectedBlogName = blog.Name
 	liveMeta.SelectedBlogUUID = blog.UUID
+	tc.selectedBlog.Store(&tumblr.Blog{UUID: blog.UUID, Name: blog.Name, Avatar: blog.Avatar})
 	if tc.userLogin != nil && tc.userLogin.UserLogin != nil {
 		tc.userLogin.RemoteName = blog.Name
 		tc.userLogin.RemoteProfile = status.RemoteProfile{
 			Username: blog.Name,
 			Name:     displayName(tc.connector, blog),
+			Avatar:   tc.userLogin.RemoteProfile.Avatar,
 		}
 	}
 	return nil
+}
+
+func (tc *TumblrClient) updateOwnGhost(ctx context.Context) {
+	blog := tc.selectedBlog.Load()
+	if blog == nil {
+		return
+	}
+	ghost, err := tc.connector.Bridge.GetGhostByID(ctx, tumblrBlogUserID(*blog))
+	if err != nil {
+		if log := tc.log(); log != nil {
+			log.Warn().Err(err).Msg("Failed to get own Tumblr ghost")
+		}
+		return
+	}
+	ghost.UpdateInfo(ctx, tc.blogUserInfo(*blog))
+	tc.loginMetadataLock.Lock()
+	tc.userLogin.RemoteProfile.Avatar = ghost.AvatarMXC
+	tc.loginMetadataLock.Unlock()
 }
 
 func (tc *TumblrClient) refreshRenamedSelectedBlog(ctx context.Context, client *tumblr.Client) (bool, error) {
@@ -531,9 +560,10 @@ func (tc *TumblrClient) refreshRenamedSelectedBlog(ctx context.Context, client *
 		return false, errTumblrClientRetired
 	}
 	defer tc.endOwnedOperation()
-	if err = tc.applySelectedBlog(userInfo, blog); err != nil {
+	if err = tc.applySelectedBlog(client, userInfo, blog); err != nil {
 		return false, err
 	}
+	tc.updateOwnGhost(ctx)
 	if err = tc.saveOwnedUserLogin(ctx); err != nil {
 		return true, fmt.Errorf("failed to save renamed Tumblr blog: %w", err)
 	}
@@ -548,7 +578,11 @@ func connectFailureState(err error, unexpectedCode status.BridgeStateErrorCode) 
 	case tumblr.IsAuthError(err):
 		return tumblrBadCredentialsState(err), false
 	case tumblr.IsIncompleteSession(err):
-		return tumblrBadCredentialsStateWithCode("tumblr-incomplete-session", err), false
+		return status.BridgeState{
+			StateEvent: status.StateUnknownError,
+			Error:      "tumblr-bootstrap-failed",
+			Info:       info,
+		}, false
 	case isTumblrRequestsForbidden(err), errors.Is(err, errSelectedBlogCannotMessage):
 		return status.BridgeState{
 			StateEvent: status.StateTransientDisconnect,
@@ -671,32 +705,19 @@ func (tc *TumblrClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal
 	return info, nil
 }
 
-func (tc *TumblrClient) GetUserInfo(_ context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
+func (tc *TumblrClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
 	if ghost == nil || ghost.Ghost == nil || strings.TrimSpace(string(ghost.ID)) == "" {
 		return nil, fmt.Errorf("ghost is required to get Tumblr user info")
 	}
-	name := string(ghost.ID)
-	if !validGhostID(name) {
-		return nil, fmt.Errorf("tumblr ghost id contains invalid characters")
+	if ghost.ID == unknownTumblrUserID {
+		name := string(unknownTumblrUserID)
+		return &bridgev2.UserInfo{Name: &name}, nil
 	}
-	displayName := cleanDisplayName(name)
-	return &bridgev2.UserInfo{
-		Identifiers: []string{"tumblr:" + name},
-		Name:        &displayName,
-	}, nil
-}
-
-func validGhostID(userID string) bool {
-	if !validRemoteID(userID) {
-		return false
+	blog := tc.selectedBlog.Load()
+	if blog == nil || !tc.IsThisUser(ctx, ghost.ID) {
+		return nil, nil
 	}
-	if strings.ContainsAny(userID, `/\?#.`) {
-		return false
-	}
-	if strings.Contains(userID, ":") && !strings.HasPrefix(userID, "t:") {
-		return false
-	}
-	return true
+	return tc.blogUserInfo(*blog), nil
 }
 
 func (tc *TumblrClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, error) {
@@ -996,11 +1017,11 @@ func (tc *TumblrClient) sendMatrixMessageToTumblr(ctx context.Context, msg *brid
 	} else {
 		switch messageType {
 		case tumblr.MessageTypeImage:
-			resp, err = client.SendImage(ctx, meta.SelectedBlogName, conversationID, image)
+			resp, err = client.SendImage(ctx, meta.SelectedBlogUUID, conversationID, image)
 		case tumblr.MessageTypePostRef:
 			resp, err = client.SendPostRef(ctx, meta.SelectedBlogUUID, conversationID, *post)
 		default:
-			resp, err = client.SendText(ctx, meta.SelectedBlogName, conversationID, text)
+			resp, err = client.SendText(ctx, meta.SelectedBlogUUID, conversationID, text)
 		}
 	}
 	if err != nil {

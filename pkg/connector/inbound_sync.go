@@ -191,6 +191,10 @@ func (tc *TumblrClient) inboundSyncLoop(generation *connectionGeneration, wake <
 				reconcile.Reset(remaining)
 				continue
 			}
+			if tc.remoteForbidden.Load() {
+				reconcile.Reset(jitterDuration(tumblrReconciliationInterval, tumblrReconciliationInterval/5))
+				continue
+			}
 			if err := tc.reconcileConversationHead(ctx); err != nil && ctx.Err() == nil {
 				tc.noteRateLimit(err)
 				if log := tc.log(); log != nil {
@@ -201,6 +205,13 @@ func (tc *TumblrClient) inboundSyncLoop(generation *connectionGeneration, wake <
 		case <-deletionReconcile.C:
 			if remaining := tc.rateLimitRemaining(); remaining > 0 {
 				deletionReconcile.Reset(remaining)
+				continue
+			}
+			if tc.remoteForbidden.Load() {
+				deletionReconcile.Reset(jitterDuration(
+					tumblrDeletionReconciliationInterval,
+					tumblrDeletionReconciliationInterval/5,
+				))
 				continue
 			}
 			if err := tc.reconcileConversationDeletions(ctx); err != nil && ctx.Err() == nil {
@@ -263,6 +274,7 @@ func (tc *TumblrClient) probeChangedConversationHeads(ctx context.Context, obser
 		if !validRemoteID(conversation.ID) {
 			continue
 		}
+		tc.bridgeListedReadReceipt(ctx, conversation)
 		headMessageID := conversationPageHeadMessageID(conversation.Messages.Data)
 		if !validRemoteID(headMessageID) {
 			continue
@@ -320,6 +332,38 @@ func (tc *TumblrClient) queueChangedConversationHead(ctx context.Context, conver
 	return true, tc.connector.DB.Jobs.PutLiveConversation(lockCtx, tc.userLogin.ID, conversationID)
 }
 
+func (tc *TumblrClient) bridgeListedReadReceipt(ctx context.Context, conversation tumblr.Conversation) {
+	if conversation.LastReadTimestamp <= 0 || tc.readReceiptAlreadyBridged(conversation) {
+		return
+	}
+	headMessageID := conversationPageHeadMessageID(conversation.Messages.Data)
+	if !validRemoteID(headMessageID) {
+		return
+	}
+	portalKey := tc.portalKey(conversation.ID)
+	head, err := tc.connector.Bridge.DB.Message.GetFirstPartByID(ctx, portalKey.Receiver, tumblrid.MakeMessageID(headMessageID))
+	if err != nil || head == nil {
+		return
+	}
+	portal, err := tc.connector.Bridge.GetExistingPortalByKey(ctx, portalKey)
+	if err != nil || portal == nil || portal.MXID == "" {
+		return
+	}
+	readReceipt := tc.readReceiptEventFromConversation(conversation, portalKey, time.Now())
+	if readReceipt == nil {
+		return
+	}
+	if err = remoteEventQueueError(tc.queueRemoteEvent(readReceipt), "tumblr read receipt"); err != nil {
+		if log := tc.log(); log != nil {
+			log.Warn().Err(err).
+				Str("conversation_id_hash", logIdentifierHash(conversation.ID)).
+				Msg("Failed to bridge Tumblr read state from conversation list")
+		}
+		return
+	}
+	tc.markReadReceiptBridged(conversation)
+}
+
 func (tc *TumblrClient) processDueConversationJobs(ctx context.Context, limit int) error {
 	if tc == nil || tc.connector == nil || tc.connector.DB == nil || tc.userLogin == nil {
 		return fmt.Errorf("tumblr durable sync database is unavailable")
@@ -362,11 +406,9 @@ func (tc *TumblrClient) processSelectedConversationJob(
 	}
 	client, err := tc.tumblrClient()
 	if err == nil {
-		var blogs []tumblr.Blog
-		blogs, err = client.ListBlockedBlogs(ctx, check.owner)
-		for _, blog := range blogs {
-			check.blocked = check.blocked || blog.UUID == check.peer
-		}
+		var blocked map[string]bool
+		blocked, err = tc.blockedBlogUUIDs(ctx, client, check.owner, true)
+		check.blocked = blocked[check.peer]
 	}
 	check.err = tc.handleRemoteError(err)
 	return tc.processSelectedConversationJobWithBlockCheck(context.WithValue(ctx, conversationBlockCheckKey{}, check), selected)
@@ -503,13 +545,14 @@ func (tc *TumblrClient) reconcileConversationHead(ctx context.Context) error {
 			if !validRemoteID(conversation.ID) {
 				continue
 			}
+			tc.bridgeListedReadReceipt(ctx, conversation)
 			if conversation.LastModifiedTimestamp > newWatermark {
 				newWatermark = conversation.LastModifiedTimestamp
 			}
 			if previousWatermark > 0 && conversation.LastModifiedTimestamp > 0 && conversation.LastModifiedTimestamp < previousWatermark {
 				continue
 			}
-			if err = tc.putLiveConversationJob(ctx, conversation.ID); err != nil {
+			if _, err = tc.queueChangedConversationHead(ctx, conversation.ID, conversationPageHeadMessageID(conversation.Messages.Data)); err != nil {
 				return err
 			}
 		}

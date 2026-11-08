@@ -932,8 +932,8 @@ func (p *PostRef) GIFPreviewCandidates() []ImageAsset {
 		if item.Cropped || item.Width <= 0 || item.Height <= 0 {
 			continue
 		}
-		itemURL := strings.TrimSpace(item.URL)
-		if itemURL == "" || !IsDownloadURLAllowed(itemURL) {
+		itemURL, isGIF := gifMediaURL(item.URL)
+		if !isGIF || !IsDownloadURLAllowed(itemURL) {
 			continue
 		}
 		if _, seen := seenURLs[itemURL]; seen {
@@ -950,6 +950,14 @@ func (p *PostRef) GIFPreviewCandidates() []ImageAsset {
 		candidates = candidates[:maxPostRefGIFCandidates]
 	}
 	return candidates
+}
+
+func gifMediaURL(rawURL string) (string, bool) {
+	rawURL = strings.TrimSpace(rawURL)
+	if base, ok := strings.CutSuffix(rawURL, ".gifv"); ok {
+		return base + ".gif", true
+	}
+	return rawURL, strings.HasSuffix(rawURL, ".gif")
 }
 
 type PostRefBlog struct {

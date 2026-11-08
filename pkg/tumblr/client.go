@@ -28,6 +28,7 @@ const (
 	DefaultAPIBaseURL       = "https://www.tumblr.com/api"
 	MaxMessageTextRunes     = 4096
 	MaxRequestLimit         = 100
+	MaxMessagesPageSize     = 20
 	defaultUserAgent        = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36"
 	DefaultMaxUploadBytes   = 5 * 1024 * 1024
 	DefaultMaxDownloadBytes = 50 * 1024 * 1024
@@ -47,11 +48,6 @@ var (
 	recaptchaSiteKeyRe = regexp.MustCompile(`"recaptchaV3PublicKey"\s*:\s*\{\s*"value"\s*:\s*"([^"]+)"`)
 	loggedOutRe        = regexp.MustCompile(`"isLoggedIn"\s*:\s*false`)
 )
-
-var apiTransientRetryDelays = []time.Duration{
-	500 * time.Millisecond,
-	1250 * time.Millisecond,
-}
 
 var authRefreshRetryDelays = []time.Duration{
 	3 * time.Second,
@@ -471,6 +467,16 @@ func (c *Client) Bootstrap(ctx context.Context) error {
 	return c.bootstrap(ctx)
 }
 
+type singleAuthRefreshContextKey struct{}
+
+func WithSingleAuthRefresh(ctx context.Context) context.Context {
+	return context.WithValue(ctx, singleAuthRefreshContextKey{}, true)
+}
+
+func (c *Client) BootstrapIfNeeded(ctx context.Context) error {
+	return c.bootstrapIfNeeded(ctx, false)
+}
+
 func (c *Client) bootstrapIfNeeded(ctx context.Context, mutating bool) error {
 	c.authRefreshMu.Lock()
 	defer c.authRefreshMu.Unlock()
@@ -494,7 +500,7 @@ func (c *Client) refreshAuthAfterFailure(ctx context.Context, failedGeneration u
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
-		if err == nil || !IsAuthError(err) || attempt >= len(authRefreshRetryDelays) {
+		if single, _ := ctx.Value(singleAuthRefreshContextKey{}).(bool); err == nil || !IsAuthError(err) || single || attempt >= len(authRefreshRetryDelays) {
 			return err
 		}
 		timer := time.NewTimer(authRefreshRetryDelays[attempt])
@@ -851,8 +857,8 @@ func (c *Client) GetConversationByParticipants(ctx context.Context, selectedBlog
 	return &response, err
 }
 
-func (c *Client) SendText(ctx context.Context, selectedBlogName, conversationID, text string) (*SendMessageResponse, error) {
-	selectedBlogName, err := requireIdentifierValue(selectedBlogName, "selected blog name")
+func (c *Client) SendText(ctx context.Context, senderParticipantID, conversationID, text string) (*SendMessageResponse, error) {
+	senderParticipantID, err := requireIdentifierValue(senderParticipantID, "sender participant ID")
 	if err != nil {
 		return nil, err
 	}
@@ -872,7 +878,7 @@ func (c *Client) SendText(ctx context.Context, selectedBlogName, conversationID,
 	}, SendMessageRequest{
 		ConversationID: conversationID,
 		Type:           MessageTypeText,
-		Participant:    selectedBlogName,
+		Participant:    senderParticipantID,
 		Message:        text,
 	}, &response)
 	if err == nil {
@@ -911,8 +917,8 @@ func (c *Client) SendTextToParticipants(ctx context.Context, senderParticipantID
 	return &response, classifySendResponseError(err)
 }
 
-func (c *Client) SendImage(ctx context.Context, selectedBlogName, conversationID string, image ImageUpload) (*SendMessageResponse, error) {
-	selectedBlogName, err := requireIdentifierValue(selectedBlogName, "selected blog name")
+func (c *Client) SendImage(ctx context.Context, senderParticipantID, conversationID string, image ImageUpload) (*SendMessageResponse, error) {
+	senderParticipantID, err := requireIdentifierValue(senderParticipantID, "sender participant ID")
 	if err != nil {
 		return nil, err
 	}
@@ -931,7 +937,7 @@ func (c *Client) SendImage(ctx context.Context, selectedBlogName, conversationID
 		Fields: map[string]string{
 			"conversation_id": conversationID,
 			"type":            MessageTypeImage,
-			"participant":     selectedBlogName,
+			"participant":     senderParticipantID,
 		},
 		FileField:       "data",
 		FileName:        image.FileName,
@@ -1347,7 +1353,6 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 
 	var err error
 	authRetried := false
-	transientAttempt := 0
 	for {
 		requestGeneration := c.currentAuthGeneration()
 		err = c.doOnce(ctx, method, path, query, body, out)
@@ -1362,21 +1367,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 			}
 			continue
 		}
-		if !isRetryableTransientSendError(method, path, err) || transientAttempt >= len(apiTransientRetryDelays) {
-			return err
-		}
-		delay := apiTransientRetryDelays[transientAttempt]
-		transientAttempt++
-		if delay <= 0 {
-			continue
-		}
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
+		return err
 	}
 }
 
@@ -1438,14 +1429,6 @@ func isDefiniteMessageRejection(err error) bool {
 	var apiErr *Error
 	return errors.As(err, &apiErr) &&
 		apiErr.StatusCode >= http.StatusBadRequest && apiErr.StatusCode < http.StatusInternalServerError
-}
-
-func isRetryableTransientSendError(method, path string, err error) bool {
-	if method != http.MethodPost || path != "/v2/conversations/messages" {
-		return false
-	}
-	var apiErr *Error
-	return errors.As(err, &apiErr) && apiErr.StatusCode >= http.StatusInternalServerError && apiErr.StatusCode < 600
 }
 
 func (c *Client) doOnce(ctx context.Context, method, path string, query url.Values, body any, out any) error {
