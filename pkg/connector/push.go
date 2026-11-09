@@ -52,6 +52,7 @@ type webPushPayload struct {
 	CryptoKey       string          `json:"crypto-key"`
 	Encryption      string          `json:"encryption"`
 	ContentEncoding string          `json:"content-encoding"`
+	Sent            int64           `json:"sent,omitempty"`
 }
 
 type tumblrConversationPush struct {
@@ -789,6 +790,7 @@ func (tc *TumblrClient) handlePushReceiverMessage(ctx context.Context, event pus
 		CryptoKey:       pushAppDataValue(event, "crypto-key"),
 		Encryption:      pushAppDataValue(event, "encryption"),
 		ContentEncoding: pushAppDataValue(event, "content-encoding"),
+		Sent:            event.Sent,
 	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -957,6 +959,29 @@ func pushRegistrationByToken(keys *PushKeys, token string) *PushRegistration {
 	return nil
 }
 
+func (tc *TumblrClient) pushRegistrationRoleForAppID(appID string) string {
+	appID = strings.TrimSpace(appID)
+	if appID == "" {
+		return "none"
+	}
+	meta, err := tc.validatedLoginMetadata()
+	if err != nil || meta.PushKeys == nil {
+		return "unknown"
+	}
+	if meta.PushKeys.Active != nil && meta.PushKeys.Active.FCMAppID == appID {
+		return "active"
+	}
+	if meta.PushKeys.Pending != nil && meta.PushKeys.Pending.FCMAppID == appID {
+		return "pending"
+	}
+	for _, registration := range meta.PushKeys.Retiring {
+		if registration != nil && registration.FCMAppID == appID {
+			return "retiring"
+		}
+	}
+	return "unknown"
+}
+
 func (tc *TumblrClient) handleWebPushPayload(ctx context.Context, data json.RawMessage) error {
 	conversationPush, err := tc.conversationFromPushPayload(data)
 	if errors.Is(err, errPushWithoutConversation) {
@@ -966,7 +991,21 @@ func (tc *TumblrClient) handleWebPushPayload(ctx context.Context, data json.RawM
 		return nil
 	} else if errors.Is(err, errUndecryptablePush) {
 		if log := tc.log(); log != nil {
-			log.Warn().Err(err).Msg("Dropping Tumblr push that can't be decrypted with this login's push keys")
+			evt := log.Warn().Err(err)
+			var envelope webPushPayload
+			if json.Unmarshal(normalizePushJSON(data), &envelope) == nil {
+				payload, _ := webPushDataBytes(envelope.Data)
+				evt = evt.
+					Str("content_encoding", envelope.ContentEncoding).
+					Bool("has_encryption", strings.TrimSpace(envelope.Encryption) != "").
+					Bool("has_crypto_key", strings.TrimSpace(envelope.CryptoKey) != "").
+					Int("payload_len", len(payload)).
+					Str("app_id_registration", tc.pushRegistrationRoleForAppID(envelope.RegID))
+				if envelope.Sent > 0 {
+					evt = evt.Dur("push_age", time.Since(time.UnixMilli(envelope.Sent)))
+				}
+			}
+			evt.Msg("Dropping Tumblr push that can't be decrypted with this login's push keys")
 		}
 		return nil
 	} else if err != nil {
