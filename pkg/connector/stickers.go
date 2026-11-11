@@ -112,6 +112,11 @@ func (tc *TumblrClient) ListImagePacks(ctx context.Context) ([]*event.ImagePackM
 		return nil, bridgev2.ErrNotLoggedIn
 	}
 	defer tc.endOwnedOperation()
+	ctx, cancel, err := tc.generationContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
 	packs, err := tc.getStickerPacks(ctx)
 	if err != nil {
 		return nil, err
@@ -136,6 +141,11 @@ func (tc *TumblrClient) DownloadImagePack(ctx context.Context, packURL string) (
 		return nil, bridgev2.ErrNotLoggedIn
 	}
 	defer tc.endOwnedOperation()
+	ctx, cancel, err := tc.generationContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
 	packID, ok := strings.CutPrefix(packURL, stickerPackURLPrefix)
 	if !ok || packID == "" {
 		return nil, mautrix.MNotFound.WithMessage("Unsupported sticker pack")
