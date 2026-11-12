@@ -132,6 +132,7 @@ type TumblrLogin struct {
 var tumblrReauthLocks sync.Map
 
 var errSelectedBlogCannotMessage = errors.New("selected tumblr blog cannot use private messages")
+var errSelectedBlogUnavailable = errors.New("selected tumblr blog is not available in the current account")
 
 func lockTumblrReauthentication(loginID networkid.UserLoginID) func() {
 	lockValue, _ := tumblrReauthLocks.LoadOrStore(loginID, &sync.Mutex{})
@@ -1055,7 +1056,7 @@ func selectedBlogFromCurrentUser(info *tumblr.UserInfoResponse, meta *UserLoginM
 		}
 		return &blog, nil
 	}
-	return nil, fmt.Errorf("selected tumblr blog is not available in the current account")
+	return nil, errSelectedBlogUnavailable
 }
 
 func normalizedMessagingBlog(blog tumblr.Blog) (tumblr.Blog, bool) {

@@ -163,6 +163,9 @@ func (tc *TumblrClient) inboundSyncLoop(generation *connectionGeneration, wake <
 				} else if !tumblr.IsAuthError(err) && ctx.Err() == nil {
 					headProbeFailures++
 					if headProbeFailures >= tumblrSyncFailedThreshold {
+						if tumblr.IsNotFound(err) && tc.failIfSelectedBlogUnavailable(ctx, generation) {
+							return
+						}
 						tc.setRemoteUnavailable(generation, err)
 					}
 				}

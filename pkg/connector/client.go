@@ -472,13 +472,7 @@ func (tc *TumblrClient) runConnectionGeneration(generation *connectionGeneration
 		if log := tc.log(); log != nil {
 			log.Debug().Err(err).Msg("Saved Tumblr blog is not available in the signed-in account")
 		}
-		blogName := strings.TrimPrefix(meta.SelectedBlogName, "@")
-		tc.failGeneration(generation, status.BridgeState{
-			StateEvent: status.StateBadCredentials,
-			Error:      "tumblr-selected-blog-unavailable",
-			Message:    fmt.Sprintf("Sign in to the Tumblr account that owns @%s to reconnect it.", blogName),
-			UserAction: status.UserActionRelogin,
-		})
+		tc.failGeneration(generation, selectedBlogUnavailableState(meta.SelectedBlogName))
 		return
 	}
 	if !tc.beginOwnedOperation() {
@@ -573,6 +567,40 @@ func (tc *TumblrClient) refreshRenamedSelectedBlog(ctx context.Context, client *
 		return true, fmt.Errorf("failed to save renamed Tumblr blog: %w", err)
 	}
 	return true, nil
+}
+
+func selectedBlogUnavailableState(selectedBlogName string) status.BridgeState {
+	return status.BridgeState{
+		StateEvent: status.StateBadCredentials,
+		Error:      "tumblr-selected-blog-unavailable",
+		Message:    fmt.Sprintf("Sign in to the Tumblr account that owns @%s to reconnect it.", strings.TrimPrefix(selectedBlogName, "@")),
+		UserAction: status.UserActionRelogin,
+	}
+}
+
+func (tc *TumblrClient) failIfSelectedBlogUnavailable(ctx context.Context, generation *connectionGeneration) bool {
+	client, err := tc.tumblrClient()
+	if err != nil {
+		return false
+	}
+	_, err = tc.refreshRenamedSelectedBlog(ctx, client)
+	if !errors.Is(err, errSelectedBlogUnavailable) {
+		if err != nil && ctx.Err() == nil {
+			if log := tc.log(); log != nil {
+				log.Warn().Err(err).Msg("Failed to check whether the selected Tumblr blog still exists")
+			}
+		}
+		return false
+	}
+	meta, err := tc.validatedLoginMetadata()
+	if err != nil {
+		return false
+	}
+	if log := tc.log(); log != nil {
+		log.Warn().Msg("Selected Tumblr blog is no longer in the signed-in account")
+	}
+	tc.failGeneration(generation, selectedBlogUnavailableState(meta.SelectedBlogName))
+	return true
 }
 
 // connectFailureState returns the state for a failed connection attempt and
