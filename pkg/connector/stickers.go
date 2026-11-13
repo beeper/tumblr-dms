@@ -3,9 +3,10 @@ package connector
 import (
 	"cmp"
 	"context"
-	"crypto/sha256"
+	"errors"
 	"fmt"
-	"net/url"
+	"mime"
+	"path"
 	"strings"
 	"time"
 
@@ -24,11 +25,6 @@ const stickerCacheTime = 5 * time.Minute
 const stickerErrorCacheTime = 30 * time.Second
 
 var _ bridgev2.StickerImportingNetworkAPI = (*TumblrClient)(nil)
-
-type cachedStickerPack struct {
-	pack      *bridgev2.ImportedImagePack
-	fetchedAt time.Time
-}
 
 func (tc *TumblrClient) getStickerPacks(ctx context.Context) ([]tumblr.StickerPack, error) {
 	if err := tc.requireLoggedIn(); err != nil {
@@ -56,55 +52,40 @@ func (tc *TumblrClient) getStickerPacks(ctx context.Context) ([]tumblr.StickerPa
 	return packs, err
 }
 
-func (tc *TumblrClient) stickerPackMetadata(ctx context.Context, client *tumblr.Client, pack *tumblr.StickerPack) event.ImagePackMetadata {
-	return event.ImagePackMetadata{
+func (tc *TumblrClient) stickerPackMetadata(ctx context.Context, pack *tumblr.StickerPack) event.ImagePackMetadata {
+	metadata := event.ImagePackMetadata{
 		DisplayName: cmp.Or(strings.TrimSpace(pack.Title), strings.TrimSpace(pack.Description)),
-		AvatarURL:   tc.stickerPackIcon(ctx, client, pack),
 		Usage:       []event.ImagePackUsage{event.ImagePackUsageSticker},
 		BridgedPack: &event.BridgedStickerPack{Network: "tumblrdms", URL: stickerPackURLPrefix + pack.ID},
 	}
+	if candidates := pack.Image.Candidates(); len(candidates) > 0 {
+		metadata.AvatarURL = id.ContentURIString(tc.userLogin.Bridge.DB.KV.Get(ctx, stickerCacheKey(candidates[0])))
+	}
+	return metadata
 }
 
-func (tc *TumblrClient) stickerPackIcon(ctx context.Context, client *tumblr.Client, pack *tumblr.StickerPack) id.ContentURIString {
-	candidates := pack.Image.Candidates()
-	if len(candidates) == 0 {
-		return ""
-	}
-	parsed, err := url.Parse(candidates[0].URL)
-	if err != nil {
-		return ""
-	}
-	// Media hosts rotate, so the cache is keyed by the CDN path.
-	key := database.Key(fmt.Sprintf("tumblr.sticker_pack_icon.%x", sha256.Sum256([]byte(parsed.Path))))
+func stickerCacheKey(image tumblr.ImageAsset) database.Key {
+	return database.Key("stickercache:" + image.URL)
+}
+
+var errStickerUpload = errors.New("failed to upload sticker")
+
+func (tc *TumblrClient) uploadSticker(ctx context.Context, client *tumblr.Client, image tumblr.ImageAsset, name string) (id.ContentURIString, error) {
+	key := stickerCacheKey(image)
 	kv := tc.userLogin.Bridge.DB.KV
 	if mxc := kv.Get(ctx, key); mxc != "" {
-		return id.ContentURIString(mxc)
+		return id.ContentURIString(mxc), nil
 	}
-	mxc, _, err := tc.uploadSticker(ctx, client, candidates[0], pack.ID)
-	if err != nil {
-		zerolog.Ctx(ctx).Warn().Err(err).Str("pack_id", pack.ID).Msg("Failed to upload Tumblr sticker pack icon")
-		return ""
-	}
-	kv.Set(ctx, key, string(mxc))
-	return mxc
-}
-
-func (tc *TumblrClient) uploadSticker(ctx context.Context, client *tumblr.Client, image tumblr.ImageAsset, name string) (id.ContentURIString, *event.FileInfo, error) {
 	downloaded, err := client.DownloadImage(ctx, image.URL, tc.maxDownloadBytes())
 	if err != nil {
-		return "", nil, err
+		return "", err
 	}
 	mxc, _, err := tc.userLogin.Bridge.Bot.UploadMedia(ctx, "", downloaded.Data, name+tumblr.CanonicalImageExtension(downloaded.MIMEType), downloaded.MIMEType)
 	if err != nil {
-		return "", nil, err
+		return "", fmt.Errorf("%w: %w", errStickerUpload, err)
 	}
-	info := &event.FileInfo{
-		MimeType: downloaded.MIMEType,
-		Size:     len(downloaded.Data),
-		Width:    image.Width,
-		Height:   image.Height,
-	}
-	return mxc, info, nil
+	kv.Set(ctx, key, string(mxc))
+	return mxc, nil
 }
 
 func (tc *TumblrClient) ListImagePacks(ctx context.Context) ([]*event.ImagePackMetadata, error) {
@@ -121,16 +102,12 @@ func (tc *TumblrClient) ListImagePacks(ctx context.Context) ([]*event.ImagePackM
 	if err != nil {
 		return nil, err
 	}
-	client, err := tc.tumblrClient()
-	if err != nil {
-		return nil, err
-	}
 	metadata := make([]*event.ImagePackMetadata, 0, len(packs))
 	for i := range packs {
 		if packs[i].ID == "" {
 			continue
 		}
-		meta := tc.stickerPackMetadata(ctx, client, &packs[i])
+		meta := tc.stickerPackMetadata(ctx, &packs[i])
 		metadata = append(metadata, &meta)
 	}
 	return metadata, nil
@@ -167,38 +144,43 @@ func (tc *TumblrClient) downloadStickerPack(ctx context.Context, pack *tumblr.St
 	if err != nil {
 		return nil, err
 	}
-	// Preview and import both download the pack, so a recent result is reused.
-	tc.stickerPackLock.Lock()
-	defer tc.stickerPackLock.Unlock()
-	if cached, ok := tc.stickerPacks[pack.ID]; ok && time.Since(cached.fetchedAt) < stickerCacheTime {
-		return cached.pack, nil
+	metadata := tc.stickerPackMetadata(ctx, pack)
+	if candidates := pack.Image.Candidates(); metadata.AvatarURL == "" && len(candidates) > 0 {
+		if metadata.AvatarURL, err = tc.uploadSticker(ctx, client, candidates[0], pack.ID); err != nil {
+			zerolog.Ctx(ctx).Warn().Err(err).Str("pack_id", pack.ID).Msg("Failed to upload Tumblr sticker pack icon")
+		}
 	}
-	metadata := tc.stickerPackMetadata(ctx, client, pack)
 	imported := &bridgev2.ImportedImagePack{
 		Shortcode: "tumblr_" + pack.ID,
-		Content:   &event.ImagePackEventContent{Metadata: metadata, Images: make(map[string]*event.ImagePackImage)},
+		Content:   &event.ImagePackEventContent{Images: make(map[string]*event.ImagePackImage)},
 	}
 	for _, sticker := range pack.Stickers {
 		candidates := sticker.Image.Candidates()
 		if sticker.ID == "" || len(candidates) == 0 {
 			continue
 		}
-		mxc, info, err := tc.uploadSticker(ctx, client, candidates[0], sticker.ID)
-		if err != nil {
+		mxc, err := tc.uploadSticker(ctx, client, candidates[0], sticker.ID)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		} else if errors.Is(err, errStickerUpload) {
 			return nil, fmt.Errorf("failed to import sticker %s: %w", sticker.ID, err)
+		} else if err != nil {
+			zerolog.Ctx(ctx).Warn().Err(err).Str("sticker_id", sticker.ID).Msg("Failed to download Tumblr sticker, skipping")
+			continue
 		}
-		if imported.Content.Metadata.AvatarURL == "" {
-			imported.Content.Metadata.AvatarURL = mxc
+		if metadata.AvatarURL == "" {
+			metadata.AvatarURL = mxc
 		}
-		info.BridgedSticker = &event.BridgedSticker{Network: "tumblrdms", ID: sticker.ID, PackURL: metadata.BridgedPack.URL}
-		imported.Content.Images[sticker.ID] = &event.ImagePackImage{URL: mxc, Body: sticker.Description, Info: info}
+		imported.Content.Images[sticker.ID] = &event.ImagePackImage{URL: mxc, Body: sticker.Description, Info: &event.FileInfo{
+			MimeType:       mime.TypeByExtension(path.Ext(candidates[0].URL)),
+			Width:          candidates[0].Width,
+			Height:         candidates[0].Height,
+			BridgedSticker: &event.BridgedSticker{Network: "tumblrdms", ID: sticker.ID, PackURL: metadata.BridgedPack.URL},
+		}}
 	}
 	if len(imported.Content.Images) == 0 {
 		return nil, mautrix.MNotFound.WithMessage("Sticker pack is empty")
 	}
-	if tc.stickerPacks == nil {
-		tc.stickerPacks = make(map[string]cachedStickerPack)
-	}
-	tc.stickerPacks[pack.ID] = cachedStickerPack{pack: imported, fetchedAt: time.Now()}
+	imported.Content.Metadata = metadata
 	return imported, nil
 }

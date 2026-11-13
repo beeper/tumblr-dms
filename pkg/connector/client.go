@@ -90,8 +90,6 @@ type TumblrClient struct {
 	stickerTray          []tumblr.StickerPack
 	stickerTrayErr       error
 	stickerTrayFetchedAt time.Time
-	stickerPackLock      sync.Mutex
-	stickerPacks         map[string]cachedStickerPack
 }
 
 var _ bridgev2.NetworkAPI = (*TumblrClient)(nil)
@@ -774,7 +772,6 @@ func (tc *TumblrClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.M
 	case event.MsgText, event.MsgNotice:
 		return tc.handleMatrixTextMessage(ctx, msg)
 	case event.MsgImage, event.CapMsgSticker:
-		// Tumblr fails native STICKER sends, so stickers, including imported ones, are sent as images.
 		return tc.handleMatrixImageMessage(ctx, msg)
 	case event.MsgVideo:
 		if canSendMatrixGIFAsTumblrImage(msg.Content) {
