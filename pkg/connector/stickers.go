@@ -162,7 +162,7 @@ func (tc *TumblrClient) downloadStickerPack(ctx context.Context, pack *tumblr.St
 		mxc, err := tc.uploadSticker(ctx, client, candidates[0], sticker.ID)
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
-		} else if errors.Is(err, errStickerUpload) {
+		} else if errors.Is(err, errStickerUpload) || tumblr.IsTransientMediaDownloadError(err) {
 			return nil, fmt.Errorf("failed to import sticker %s: %w", sticker.ID, err)
 		} else if err != nil {
 			zerolog.Ctx(ctx).Warn().Err(err).Str("sticker_id", sticker.ID).Msg("Failed to download Tumblr sticker, skipping")
