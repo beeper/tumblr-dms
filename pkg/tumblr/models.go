@@ -1019,7 +1019,7 @@ type SendMessageRequest struct {
 	Type           string   `json:"type"`
 	Context        string   `json:"context,omitempty"`
 	Participant    string   `json:"participant"`
-	StickerID      string   `json:"stickerId,omitempty"`
+	StickerID      string   `json:"sticker_id,omitempty"`
 	Post           any      `json:"post,omitempty"`
 	Message        string   `json:"message"`
 }

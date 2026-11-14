@@ -14,6 +14,7 @@ const MaxTextLength = tumblr.MaxMessageTextRunes
 
 var generalCaps = bridgev2.NetworkGeneralCapabilities{
 	Provisioning: bridgev2.ProvisioningCapabilities{
+		ImagePackImport: true,
 		ResolveIdentifier: bridgev2.ResolveIdentifierCapabilities{
 			LookupUsername: true,
 			CreateDM:       false,

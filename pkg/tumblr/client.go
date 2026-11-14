@@ -1009,8 +1009,8 @@ func (c *Client) SendImageToParticipants(ctx context.Context, senderParticipantI
 	return &response, classifySendResponseError(err)
 }
 
-func (c *Client) SendSticker(ctx context.Context, selectedBlogName, conversationID, stickerID string) (*SendMessageResponse, error) {
-	selectedBlogName, err := requireIdentifierValue(selectedBlogName, "selected blog name")
+func (c *Client) SendSticker(ctx context.Context, senderParticipantID, conversationID, stickerID string) (*SendMessageResponse, error) {
+	senderParticipantID, err := requireIdentifierValue(senderParticipantID, "sender participant ID")
 	if err != nil {
 		return nil, err
 	}
@@ -1028,7 +1028,7 @@ func (c *Client) SendSticker(ctx context.Context, selectedBlogName, conversation
 	}, SendMessageRequest{
 		ConversationID: conversationID,
 		Type:           MessageTypeSticker,
-		Participant:    selectedBlogName,
+		Participant:    senderParticipantID,
 		StickerID:      stickerID,
 	}, &response)
 	if err == nil {

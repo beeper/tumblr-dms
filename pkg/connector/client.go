@@ -85,6 +85,11 @@ type TumblrClient struct {
 	listedConversations     map[string]struct{}
 	listedConversationsAt   time.Time
 	listedMissingQueued     map[string]queuedMissingConversation
+
+	stickerLock          sync.Mutex
+	stickerTray          []tumblr.StickerPack
+	stickerTrayErr       error
+	stickerTrayFetchedAt time.Time
 }
 
 var _ bridgev2.NetworkAPI = (*TumblrClient)(nil)
@@ -834,6 +839,9 @@ func (tc *TumblrClient) handleMatrixTextMessage(ctx context.Context, msg *bridge
 }
 
 func (tc *TumblrClient) handleMatrixImageMessage(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, error) {
+	if image, ok := tc.tumblrStickerImage(ctx, tumblrStickerID(msg.Content)); ok {
+		return tc.sendMatrixMessageToTumblr(ctx, msg, tumblr.MessageTypeSticker, "", image, nil)
+	}
 	image, err := tc.downloadMatrixImage(ctx, msg)
 	if err != nil {
 		return nil, err
@@ -1047,6 +1055,8 @@ func (tc *TumblrClient) sendMatrixMessageToTumblr(ctx context.Context, msg *brid
 			switch messageType {
 			case tumblr.MessageTypeImage:
 				resp, err = client.SendImageToParticipants(postCtx, meta.SelectedBlogUUID, pendingMeta.PendingParticipantIDs, image)
+			case tumblr.MessageTypeSticker:
+				resp, err = client.SendStickerToParticipants(postCtx, meta.SelectedBlogUUID, pendingMeta.PendingParticipantIDs, tumblrStickerID(msg.Content))
 			case tumblr.MessageTypePostRef:
 				resp, err = client.SendPostRefToParticipants(postCtx, meta.SelectedBlogUUID, pendingMeta.PendingParticipantIDs, *post)
 			default:
@@ -1056,6 +1066,8 @@ func (tc *TumblrClient) sendMatrixMessageToTumblr(ctx context.Context, msg *brid
 			switch messageType {
 			case tumblr.MessageTypeImage:
 				resp, err = client.SendImage(postCtx, meta.SelectedBlogUUID, conversationID, image)
+			case tumblr.MessageTypeSticker:
+				resp, err = client.SendSticker(postCtx, meta.SelectedBlogUUID, conversationID, tumblrStickerID(msg.Content))
 			case tumblr.MessageTypePostRef:
 				resp, err = client.SendPostRef(postCtx, meta.SelectedBlogUUID, conversationID, *post)
 			default:

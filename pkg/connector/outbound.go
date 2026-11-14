@@ -241,7 +241,7 @@ func outboundMessageType(messageType string) (tumblrdb.OutboundMessageType, erro
 	switch messageType {
 	case tumblr.MessageTypeText:
 		return tumblrdb.OutboundMessageText, nil
-	case tumblr.MessageTypeImage:
+	case tumblr.MessageTypeImage, tumblr.MessageTypeSticker:
 		return tumblrdb.OutboundMessageImage, nil
 	case tumblr.MessageTypePostRef:
 		return tumblrdb.OutboundMessagePostRef, nil
@@ -254,7 +254,7 @@ func outboundContentHash(messageType, text string, image tumblr.ImageUpload, pos
 	switch messageType {
 	case tumblr.MessageTypeText:
 		return tumblrdb.HashOutboundContent([]byte(text)), nil
-	case tumblr.MessageTypeImage:
+	case tumblr.MessageTypeImage, tumblr.MessageTypeSticker:
 		if len(image.Data) == 0 {
 			return tumblrdb.OutboundContentHash{}, fmt.Errorf("outbound image content is empty")
 		}
