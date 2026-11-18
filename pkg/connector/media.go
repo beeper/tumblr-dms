@@ -143,6 +143,7 @@ func (tc *TumblrClient) convertTumblrMessageWithMedia(ctx context.Context, porta
 			}
 			if log := tc.log(); log != nil {
 				log.Warn().
+					Err(err).
 					Str("message_id_hash", logIdentifierHash(message.ID)).
 					Str("message_type", logMessageType(message.Type)).
 					Int("logical_image_index", index).
