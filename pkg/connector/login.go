@@ -115,6 +115,7 @@ type TumblrLogin struct {
 	User      *bridgev2.User
 	tc        *TumblrConnector
 	flow      string
+	browser   bool
 	override  *bridgev2.UserLogin
 	transport http.RoundTripper
 
@@ -166,7 +167,8 @@ func (tc *TumblrConnector) CreateLogin(_ context.Context, user *bridgev2.User, f
 	if flowID == "" {
 		flowID = loginFlowPassword
 	}
-	if flowID == loginFlowBrowser {
+	browser := flowID == loginFlowBrowser
+	if browser {
 		flowID = loginFlowCookies
 	}
 	if flowID != loginFlowPassword && flowID != loginFlowCookies {
@@ -178,7 +180,7 @@ func (tc *TumblrConnector) CreateLogin(_ context.Context, user *bridgev2.User, f
 	if user == nil {
 		return nil, fmt.Errorf("matrix user is required to start tumblr login")
 	}
-	return &TumblrLogin{User: user, tc: tc, flow: flowID}, nil
+	return &TumblrLogin{User: user, tc: tc, flow: flowID, browser: browser}, nil
 }
 
 func (tl *TumblrLogin) Start(ctx context.Context) (*bridgev2.LoginStep, error) {
@@ -425,6 +427,15 @@ func (tl *TumblrLogin) cookieStep(instructions string) *bridgev2.LoginStep {
 		},
 	}
 	fields = append(fields, tumblrBrowserSessionCookieFields...)
+	if tl.browser {
+		// SSO lands on /messages straight from a full-page redirect, before any
+		// logged-in request is seen, so wait for the session cookie itself.
+		for i := range fields {
+			if fields[i].ID == "sid" {
+				fields[i].Required = true
+			}
+		}
+	}
 	fields = append(fields,
 		tumblrBrowserUserAgentField(),
 		bridgev2.LoginCookieField{
