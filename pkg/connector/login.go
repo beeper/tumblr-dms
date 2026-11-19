@@ -458,6 +458,7 @@ func (tl *TumblrLogin) cookieStep(instructions string) *bridgev2.LoginStep {
 		Instructions: instructions,
 		CookiesParams: &bridgev2.LoginCookiesParams{
 			URL:               "https://www.tumblr.com/messages",
+			UserAgent:         tumblrLoginWebViewUserAgent(),
 			WaitForURLPattern: `^https://www\.tumblr\.com/(?:messages|messaging|dashboard|blog/[^/?#]+/messages)(?:[/?#].*)?$`,
 			Fields:            fields,
 			ExtractJS:         tumblrExtractJSSession,
