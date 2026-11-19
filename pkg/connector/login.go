@@ -648,7 +648,48 @@ func (tl *TumblrLogin) submitCookieInput(ctx context.Context, cookies map[string
 		HTTPClient: tl.newLoginHTTPClient(),
 	})
 	tl.browserUserAgent = browserUserAgent
+	if probeErr := client.Bootstrap(ctx); probeErr != nil && tl.User != nil {
+		log := tl.User.Log
+		log.Info().Str("probe", "webview_ua").Str("result", probeTrunc(probeErr)).Msg("Tumblr bootstrap probe")
+		var chosen *tumblr.Client
+		for _, name := range []string{"bridge_default", "chrome_mobile", "chrome_desktop", "safari_mac"} {
+			ua := tumblrLoginUserAgentPresets[name]
+			if name == "bridge_default" {
+				ua = tl.tc.Config.BrowserUserAgent()
+			}
+			c2 := tumblr.NewClient(tumblr.Options{
+				Cookies: tumblr.NewCookieJar(tumblr.SessionCookiesFromMap(cookies)), APIToken: apiToken, CSRFToken: csrfToken,
+				APIVersion: apiVersion, UserAgent: ua, HTTPClient: tl.newLoginHTTPClient(),
+			})
+			e2 := c2.Bootstrap(ctx)
+			log.Info().Str("probe", name).Str("ua", ua).Str("result", probeTrunc(e2)).Msg("Tumblr bootstrap probe")
+			if e2 == nil && chosen == nil {
+				chosen = c2
+				tl.browserUserAgent = ua
+			}
+		}
+		c3 := tumblr.NewClient(tumblr.Options{
+			Cookies: tumblr.NewCookieJar(tumblr.SessionCookiesFromMap(cookies)), APIToken: apiToken, CSRFToken: csrfToken,
+			APIVersion: apiVersion, UserAgent: browserUserAgent, HTTPClient: tl.newLoginHTTPClient(),
+		})
+		_, e3 := c3.CurrentUser(tumblr.WithSingleAuthRefresh(ctx))
+		log.Info().Str("probe", "api_current_user_webview_token").Bool("had_api_token", apiToken != "").Str("result", probeTrunc(e3)).Msg("Tumblr bootstrap probe")
+		if chosen != nil {
+			client = chosen
+		}
+	}
 	return tl.finishAuthentication(ctx, client)
+}
+
+func probeTrunc(err error) string {
+	if err == nil {
+		return "ok"
+	}
+	s := err.Error()
+	if len(s) > 400 {
+		s = s[:400]
+	}
+	return s
 }
 
 func (tl *TumblrLogin) finishAuthentication(ctx context.Context, client *tumblr.Client) (*bridgev2.LoginStep, error) {
