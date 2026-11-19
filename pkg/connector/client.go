@@ -621,7 +621,14 @@ func connectFailureState(err error, unexpectedCode status.BridgeStateErrorCode) 
 			Error:      "tumblr-bootstrap-failed",
 			Info:       info,
 		}, false
-	case isTumblrRequestsForbidden(err), errors.Is(err, errSelectedBlogCannotMessage):
+	case errors.Is(err, errSelectedBlogCannotMessage):
+		return status.BridgeState{
+			StateEvent: status.StateBadCredentials,
+			Error:      "tumblr-blog-cannot-message",
+			UserAction: status.UserActionOpenNative,
+			Info:       info,
+		}, true
+	case isTumblrRequestsForbidden(err):
 		return status.BridgeState{
 			StateEvent: status.StateTransientDisconnect,
 			Error:      "tumblr-requests-forbidden",
