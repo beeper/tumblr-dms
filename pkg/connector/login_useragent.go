@@ -39,7 +39,7 @@ func tumblrLoginWebViewUserAgent() string {
 		preset = v
 	}
 	if preset == "custom" {
-		return strings.ReplaceAll(getAndroidProp("debug.beeper.tumblr_ua_1")+getAndroidProp("debug.beeper.tumblr_ua_2")+getAndroidProp("debug.beeper.tumblr_ua_3"), "_", " ")
+		return getAndroidProp("debug.beeper.tumblr_ua_1") + getAndroidProp("debug.beeper.tumblr_ua_2") + getAndroidProp("debug.beeper.tumblr_ua_3")
 	}
 	if ua, ok := tumblrLoginUserAgentPresets[preset]; ok {
 		return ua
