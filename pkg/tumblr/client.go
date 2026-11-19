@@ -548,10 +548,12 @@ func (c *Client) bootstrap(ctx context.Context) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		probeBody, _ := io.ReadAll(io.LimitReader(resp.Body, 600))
 		return &BootstrapError{
 			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("failed to load Tumblr messaging page: HTTP %d", resp.StatusCode),
-			Auth:       resp.StatusCode == http.StatusUnauthorized,
+			Message: fmt.Sprintf("failed to load Tumblr messaging page: HTTP %d (probe: url=%s server=%q ctype=%q via=%q xcache=%q ua=%q body=%q)", resp.StatusCode,
+				resp.Request.URL.Path, resp.Header.Get("Server"), resp.Header.Get("Content-Type"), resp.Header.Get("Via"), resp.Header.Get("X-Cache"), req.Header.Get("User-Agent"), string(probeBody)),
+			Auth: resp.StatusCode == http.StatusUnauthorized,
 		}
 	}
 	if isLoginPath(resp.Request.URL.Path) {
