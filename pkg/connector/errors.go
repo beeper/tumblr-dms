@@ -25,6 +25,7 @@ func init() {
 		"tumblr-current-user-failed":    "Beeper couldn't load your Tumblr account because of an unexpected error.",
 		"tumblr-unavailable":            "Tumblr is temporarily unavailable. Beeper will keep trying to reconnect.",
 		"tumblr-requests-forbidden":     "Tumblr is refusing requests from this account right now, so messages can't be sent or received. Beeper will reconnect when Tumblr allows it again.",
+		"tumblr-blog-cannot-message":    "Tumblr hasn't enabled messaging for this account yet. Make sure your email address is verified on Tumblr; new accounts get messaging after using Tumblr for a while. Beeper will reconnect once Tumblr allows it.",
 		"tumblr-sync-failed":            "Beeper is having trouble reaching Tumblr, so new messages may be delayed. Beeper will keep retrying.",
 	})
 }
