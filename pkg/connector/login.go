@@ -23,6 +23,7 @@ import (
 const (
 	loginFlowPassword = "password"
 	loginFlowCookies  = "cookies"
+	loginFlowBrowser  = "browser"
 
 	loginStepIDCredentials         = "com.ifixrobots.tumblr_dms.login.credentials"
 	loginStepIDTwoFactor           = "com.ifixrobots.tumblr_dms.login.two_factor"
@@ -153,12 +154,20 @@ func (tc *TumblrConnector) GetLoginFlows() []bridgev2.LoginFlow {
 			Description: "Sign in to Tumblr through Beeper.",
 			ID:          loginFlowPassword,
 		},
+		{
+			Name:        "Browser",
+			Description: "Sign in on tumblr.com. Works with Google and Apple sign-in.",
+			ID:          loginFlowBrowser,
+		},
 	}
 }
 
 func (tc *TumblrConnector) CreateLogin(_ context.Context, user *bridgev2.User, flowID string) (bridgev2.LoginProcess, error) {
 	if flowID == "" {
 		flowID = loginFlowPassword
+	}
+	if flowID == loginFlowBrowser {
+		flowID = loginFlowCookies
 	}
 	if flowID != loginFlowPassword && flowID != loginFlowCookies {
 		return nil, bridgev2.ErrInvalidLoginFlowID
