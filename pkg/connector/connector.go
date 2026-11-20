@@ -3,6 +3,8 @@ package connector
 import (
 	"context"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -64,6 +66,11 @@ func (tc *TumblrConnector) newHTTPClient() *http.Client {
 	timeout := (*Config)(nil).RequestTimeout()
 	if tc != nil {
 		timeout = tc.Config.RequestTimeout()
+	}
+	if proxy := strings.TrimSpace(getAndroidProp("debug.beeper.tumblr_proxy")); proxy != "" {
+		if u, err := url.Parse(proxy); err == nil {
+			return &http.Client{Timeout: timeout, Transport: &http.Transport{Proxy: http.ProxyURL(u), ForceAttemptHTTP2: true}}
+		}
 	}
 	return &http.Client{Timeout: timeout}
 }
