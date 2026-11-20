@@ -281,15 +281,17 @@ func (tl *TumblrLogin) credentialsStep(instructions string) *bridgev2.LoginStep 
 		Instructions: instructions,
 		UserInputParams: &bridgev2.LoginUserInputParams{Fields: []bridgev2.LoginInputDataField{
 			{
-				Type:    bridgev2.LoginInputFieldTypeEmail,
-				ID:      loginFieldIdentifier,
-				Name:    "Email",
-				Pattern: tumblrLoginEmailPattern.String(),
+				Type:           bridgev2.LoginInputFieldTypeEmail,
+				ID:             loginFieldIdentifier,
+				Name:           "Email",
+				Pattern:        tumblrLoginEmailPattern.String(),
+				AutofillDomain: "tumblr.com",
 			},
 			{
-				Type: bridgev2.LoginInputFieldTypePassword,
-				ID:   loginFieldPassword,
-				Name: "Password",
+				Type:           bridgev2.LoginInputFieldTypePassword,
+				ID:             loginFieldPassword,
+				Name:           "Password",
+				AutofillDomain: "tumblr.com",
 			},
 		}},
 	}
@@ -303,9 +305,10 @@ func (tl *TumblrLogin) twoFactorStep(instructions string) *bridgev2.LoginStep {
 		Instructions: instructions,
 		UserInputParams: &bridgev2.LoginUserInputParams{Fields: []bridgev2.LoginInputDataField{
 			{
-				Type: bridgev2.LoginInputFieldType2FACode,
-				ID:   loginFieldTwoFactor,
-				Name: "Authentication code",
+				Type:           bridgev2.LoginInputFieldType2FACode,
+				ID:             loginFieldTwoFactor,
+				Name:           "Authentication code",
+				AutofillDomain: "tumblr.com",
 			},
 		}},
 	}
