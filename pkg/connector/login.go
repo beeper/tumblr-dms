@@ -662,6 +662,8 @@ func (tl *TumblrLogin) submitCookieInput(ctx context.Context, cookies map[string
 	if probeErr := client.Bootstrap(ctx); probeErr != nil && tl.User != nil {
 		log := tl.User.Log
 		log.Info().Str("probe", "webview_ua").Str("result", probeTrunc(probeErr)).Msg("Tumblr bootstrap probe")
+		probeTumblrChallenge(ctx, &log, tumblr.SessionCookieHeader(tumblr.SessionCookiesFromMap(cookies)), browserUserAgent)
+		probeTumblrChallenge(ctx, &log, cookies["cookie_header"], browserUserAgent)
 		var chosen *tumblr.Client
 		for _, name := range []string{"bridge_default", "chrome_mobile", "chrome_desktop", "safari_mac"} {
 			ua := tumblrLoginUserAgentPresets[name]
