@@ -234,9 +234,6 @@ func (tl *TumblrLogin) reset() {
 	tl.clearPendingAuthentication()
 	tl.browserAttempt = 0
 	tl.passwordRejections = 0
-	if tl.flow == loginFlowPassword {
-		tl.browser = false
-	}
 	tl.override = nil
 	tl.transport = nil
 }
@@ -570,8 +567,7 @@ func (tl *TumblrLogin) submitPassword(ctx context.Context, blackboxSessionID str
 			tl.clearPendingAuthentication()
 			return nil, tumblrAccountPendingDeletionError()
 		case needsCaptcha:
-			tl.clearPendingAuthentication()
-			return tl.cookieStep(loginInstructions), nil
+			return tl.webLoginStep(loginInstructions), nil
 		case needsTwoFactor && tl.twoFactor == "":
 			return tl.twoFactorStep("Enter the code from your authenticator app, or use a single-use backup code."), nil
 		case needsTwoFactor:
