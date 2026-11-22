@@ -129,6 +129,8 @@ type TumblrLogin struct {
 	twoFactor        string
 	browserUserAgent string
 	browserAttempt   uint64
+
+	passwordRejections int
 }
 
 var tumblrReauthLocks sync.Map
@@ -231,6 +233,10 @@ func (tl *TumblrLogin) reset() {
 	tl.step = ""
 	tl.clearPendingAuthentication()
 	tl.browserAttempt = 0
+	tl.passwordRejections = 0
+	if tl.flow == loginFlowPassword {
+		tl.browser = false
+	}
 	tl.override = nil
 	tl.transport = nil
 }
@@ -479,6 +485,12 @@ func (tl *TumblrLogin) cookieStep(instructions string) *bridgev2.LoginStep {
 	}
 }
 
+func (tl *TumblrLogin) webLoginStep(instructions string) *bridgev2.LoginStep {
+	tl.clearPendingAuthentication()
+	tl.browser = true
+	return tl.cookieStep(instructions)
+}
+
 func (tl *TumblrLogin) Cancel() {
 	tl.reset()
 }
@@ -569,6 +581,10 @@ func (tl *TumblrLogin) submitPassword(ctx context.Context, blackboxSessionID str
 			tl.twoFactor = ""
 			return tl.twoFactorStep("That authentication code was not accepted. Check the code and try again."), nil
 		case tumblrHTTPStatus(err) == http.StatusUnauthorized:
+			tl.passwordRejections++
+			if tl.passwordRejections >= 2 {
+				return tl.webLoginStep("Tumblr still did not accept that email and password. Sign in on tumblr.com instead. This works with Google and Apple sign-in too."), nil
+			}
 			tl.clearPendingAuthentication()
 			return tl.credentialsStep("Tumblr did not accept that email and password. Check the registered account email and password and try again."), nil
 		case tumblr.IsLoginInputError(err):
@@ -608,12 +624,15 @@ func (tl *TumblrLogin) SubmitCookies(ctx context.Context, cookies map[string]str
 func (tl *TumblrLogin) submitBrowserVerification(ctx context.Context, input map[string]string) (*bridgev2.LoginStep, error) {
 	blackboxSessionID := strings.TrimSpace(input[loginFieldBlackbox])
 	browserUserAgent := normalizeOptionalHeaderCredential(input[loginFieldUserAgent])
+	if blackboxSessionID == "" {
+		if tl.User != nil {
+			tl.User.Log.Debug().Msg("Tumblr browser verification returned no Blackbox session, switching to tumblr.com sign-in")
+		}
+		return tl.webLoginStep("Tumblr's secure sign-in check did not finish on this device. Sign in on tumblr.com instead. This works with Google and Apple sign-in too."), nil
+	}
 	if browserUserAgent == "" {
 		tl.clearPendingAuthentication()
 		return tl.credentialsStep("Tumblr's secure sign-in check did not finish. Enter your credentials and try again."), nil
-	}
-	if blackboxSessionID == "" && tl.User != nil {
-		tl.User.Log.Debug().Msg("Tumblr browser verification returned no Blackbox session, signing in without it")
 	}
 	if tl.client != nil && tl.browserUserAgent != browserUserAgent {
 		tl.clearPendingAuthentication()
