@@ -24,6 +24,8 @@ const (
 	loginFlowPassword = "password"
 	loginFlowCookies  = "cookies"
 	loginFlowBrowser  = "browser"
+	loginFlowGoogle   = "google"
+	loginFlowApple    = "apple"
 
 	loginStepIDCredentials         = "com.ifixrobots.tumblr_dms.login.credentials"
 	loginStepIDTwoFactor           = "com.ifixrobots.tumblr_dms.login.two_factor"
@@ -112,12 +114,15 @@ func tumblrCookieSources(name string) []bridgev2.LoginCookieFieldSource {
 }
 
 type TumblrLogin struct {
-	User      *bridgev2.User
-	tc        *TumblrConnector
-	flow      string
-	browser   bool
-	override  *bridgev2.UserLogin
-	transport http.RoundTripper
+	User    *bridgev2.User
+	tc      *TumblrConnector
+	flow    string
+	browser bool
+	// Tumblr's /auth/<provider> path for the Google and Apple flows, which open the provider's
+	// sign-in page directly instead of tumblr.com/login.
+	ssoProvider string
+	override    *bridgev2.UserLogin
+	transport   http.RoundTripper
 
 	step             string
 	client           *tumblr.Client
@@ -162,6 +167,16 @@ func (tc *TumblrConnector) GetLoginFlows() []bridgev2.LoginFlow {
 			Description: "Sign in on tumblr.com. Works with Google and Apple sign-in.",
 			ID:          loginFlowBrowser,
 		},
+		{
+			Name:        "Google",
+			Description: "Sign in with the Google account linked to your Tumblr account.",
+			ID:          loginFlowGoogle,
+		},
+		{
+			Name:        "Apple",
+			Description: "Sign in with the Apple account linked to your Tumblr account.",
+			ID:          loginFlowApple,
+		},
 	}
 }
 
@@ -169,7 +184,14 @@ func (tc *TumblrConnector) CreateLogin(_ context.Context, user *bridgev2.User, f
 	if flowID == "" {
 		flowID = loginFlowPassword
 	}
-	browser := flowID == loginFlowBrowser
+	var ssoProvider string
+	switch flowID {
+	case loginFlowGoogle:
+		ssoProvider = "google"
+	case loginFlowApple:
+		ssoProvider = "apple"
+	}
+	browser := flowID == loginFlowBrowser || ssoProvider != ""
 	if browser {
 		flowID = loginFlowCookies
 	}
@@ -182,7 +204,7 @@ func (tc *TumblrConnector) CreateLogin(_ context.Context, user *bridgev2.User, f
 	if user == nil {
 		return nil, fmt.Errorf("matrix user is required to start tumblr login")
 	}
-	return &TumblrLogin{User: user, tc: tc, flow: flowID, browser: browser}, nil
+	return &TumblrLogin{User: user, tc: tc, flow: flowID, browser: browser, ssoProvider: ssoProvider}, nil
 }
 
 func (tl *TumblrLogin) Start(ctx context.Context) (*bridgev2.LoginStep, error) {
@@ -215,6 +237,9 @@ func (tl *TumblrLogin) StartWithParams(_ context.Context, params bridgev2.LoginS
 	if tl.override == nil {
 		if tl.flow == loginFlowPassword {
 			return tl.credentialsStep("Enter the email and password for your Tumblr account."), nil
+		}
+		if tl.ssoProvider != "" {
+			return tl.cookieStep(tl.ssoInstructions()), nil
 		}
 		return tl.cookieStep(loginInstructions), nil
 	}
@@ -474,12 +499,29 @@ func (tl *TumblrLogin) cookieStep(instructions string) *bridgev2.LoginStep {
 		StepID:       loginStepIDCookies,
 		Instructions: instructions,
 		CookiesParams: &bridgev2.LoginCookiesParams{
-			URL:               "https://www.tumblr.com/messages",
+			URL:               tl.cookieStepURL(),
 			WaitForURLPattern: `^https://www\.tumblr\.com/(?:messages|messaging|dashboard|blog/[^/?#]+/messages)(?:[/?#].*)?$`,
 			Fields:            fields,
 			ExtractJS:         tumblrExtractJSSession,
 		},
 	}
+}
+
+// cookieStepURL is where the sign-in window opens. Tumblr's /auth/<provider> answers with a redirect
+// to Google's or Apple's sign-in page, and after sign-in returns to redirectTo.
+func (tl *TumblrLogin) cookieStepURL() string {
+	if tl.ssoProvider != "" {
+		return "https://www.tumblr.com/auth/" + tl.ssoProvider + "?redirectTo=%2Fmessages"
+	}
+	return "https://www.tumblr.com/messages"
+}
+
+func (tl *TumblrLogin) ssoInstructions() string {
+	provider := "Google"
+	if tl.ssoProvider == "apple" {
+		provider = "Apple"
+	}
+	return fmt.Sprintf("Sign in with %s in the window that opens. Beeper stores the session data needed to keep your Tumblr DMs connected.", provider)
 }
 
 func (tl *TumblrLogin) webLoginStep(instructions string) *bridgev2.LoginStep {
