@@ -1,0 +1,145 @@
+{
+	"namespace": "tumblr-dms",
+	"messages": [
+		{
+			"key": "tumblr-dms:login.field.blog.name",
+			"english": "Tumblr inbox"
+		},
+		{
+			"key": "tumblr-dms:login.field.identifier.name",
+			"english": "Email"
+		},
+		{
+			"key": "tumblr-dms:login.field.password.name",
+			"english": "Password"
+		},
+		{
+			"key": "tumblr-dms:login.field.two_factor.name",
+			"english": "Authentication code"
+		},
+		{
+			"key": "tumblr-dms:login.flow.apple.description",
+			"english": "Sign in with the Apple account linked to your Tumblr account."
+		},
+		{
+			"key": "tumblr-dms:login.flow.apple.name",
+			"english": "Apple"
+		},
+		{
+			"key": "tumblr-dms:login.flow.browser.description",
+			"english": "Sign in on tumblr.com. Works with Google and Apple sign-in."
+		},
+		{
+			"key": "tumblr-dms:login.flow.browser.name",
+			"english": "Browser"
+		},
+		{
+			"key": "tumblr-dms:login.flow.google.description",
+			"english": "Sign in with the Google account linked to your Tumblr account."
+		},
+		{
+			"key": "tumblr-dms:login.flow.google.name",
+			"english": "Google"
+		},
+		{
+			"key": "tumblr-dms:login.flow.password.description",
+			"english": "Sign in to Tumblr through Beeper."
+		},
+		{
+			"key": "tumblr-dms:login.flow.password.name",
+			"english": "Email \u0026 password"
+		},
+		{
+			"key": "tumblr-dms:login.step.blog.instructions",
+			"english": "Choose the Tumblr inbox you want to connect."
+		},
+		{
+			"key": "tumblr-dms:login.step.complete.instructions",
+			"english": "Tumblr is connected as @{blog}.",
+			"params": [
+				"blog"
+			],
+			"comment": "blog is the Tumblr blog name without a leading @, e.g. exampleblog"
+		},
+		{
+			"key": "tumblr-dms:login.step.credentials.instructions",
+			"english": "Enter the email and password for your Tumblr account."
+		},
+		{
+			"key": "tumblr-dms:login.step.credentials_missing.instructions",
+			"english": "Enter both your Tumblr email and password."
+		},
+		{
+			"key": "tumblr-dms:login.step.email_required.instructions",
+			"english": "Use the email address registered to your Tumblr account, not a blog name or username."
+		},
+		{
+			"key": "tumblr-dms:login.step.no_browser_identity.instructions",
+			"english": "Tumblr's sign-in window did not return a browser identity. Please try again."
+		},
+		{
+			"key": "tumblr-dms:login.step.password_rejected.instructions",
+			"english": "Tumblr did not accept that email and password. Check the registered account email and password and try again."
+		},
+		{
+			"key": "tumblr-dms:login.step.password_rejected_browser.instructions",
+			"english": "Tumblr still did not accept that email and password. Sign in on tumblr.com instead. This works with Google and Apple sign-in too."
+		},
+		{
+			"key": "tumblr-dms:login.step.preparing.instructions",
+			"english": "Preparing Tumblr's secure sign-in."
+		},
+		{
+			"key": "tumblr-dms:login.step.reconnect.instructions",
+			"english": "Sign in to Tumblr again to reconnect {blog}. This refreshes the saved session and keeps the same sending blog.",
+			"params": [
+				"blog"
+			],
+			"comment": "blog is the Tumblr blog handle with a leading @, e.g. @exampleblog"
+		},
+		{
+			"key": "tumblr-dms:login.step.reconnect_blog.instructions",
+			"english": "Sign in to Tumblr again to reconnect this Tumblr blog. This refreshes the saved session and keeps the same sending blog."
+		},
+		{
+			"key": "tumblr-dms:login.step.request_failed.instructions",
+			"english": "The request did not complete on this device. Please try again."
+		},
+		{
+			"key": "tumblr-dms:login.step.sign_in.instructions",
+			"english": "Sign in to Tumblr in the window that opens, then open Messages. Beeper stores the session data needed to keep your DMs connected."
+		},
+		{
+			"key": "tumblr-dms:login.step.sign_in_apple.instructions",
+			"english": "Sign in with Apple in the window that opens. Beeper stores the session data needed to keep your Tumblr DMs connected."
+		},
+		{
+			"key": "tumblr-dms:login.step.sign_in_failed.instructions",
+			"english": "Tumblr couldn't complete that sign-in. Make sure you're using the registered account email, not a blog name, and try again."
+		},
+		{
+			"key": "tumblr-dms:login.step.sign_in_google.instructions",
+			"english": "Sign in with Google in the window that opens. Beeper stores the session data needed to keep your Tumblr DMs connected."
+		},
+		{
+			"key": "tumblr-dms:login.step.two_factor.instructions",
+			"english": "Enter the code from your authenticator app, or use a single-use backup code."
+		},
+		{
+			"key": "tumblr-dms:login.step.two_factor_rejected.instructions",
+			"english": "That authentication code was not accepted. Check the code and try again."
+		},
+		{
+			"key": "tumblr-dms:login.step.verification_browser_changed.instructions",
+			"english": "Tumblr's secure sign-in browser changed. Enter your credentials and try again."
+		},
+		{
+			"key": "tumblr-dms:login.step.verification_failed.instructions",
+			"english": "Tumblr's secure sign-in check did not finish. Enter your credentials and try again."
+		},
+		{
+			"key": "tumblr-dms:login.step.verification_failed_browser.instructions",
+			"english": "Tumblr's secure sign-in check did not finish on this device. Sign in on tumblr.com instead. This works with Google and Apple sign-in too."
+		}
+	]
+}

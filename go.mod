@@ -10,13 +10,13 @@ require (
 	git.min.rip/min/webpush-client-go v1.3.0
 	github.com/beeper/push-receiver v0.0.0-20260611104659-b7d6a21272e0
 	github.com/rs/zerolog v1.35.1
-	go.mau.fi/util v0.11.1
+	go.mau.fi/util v0.11.2-0.20261123182504-13194d8788b7
 	golang.org/x/image v0.44.0
 	golang.org/x/net v0.62.0
 	golang.org/x/sys v0.50.0
 	google.golang.org/protobuf v1.36.12
 	gopkg.in/yaml.v3 v3.0.1
-	maunium.net/go/mautrix v0.33.1-0.20261120111454-33abe66d85a0
+	maunium.net/go/mautrix v0.33.1-0.20261123182552-2fd758b53ce1
 )
 
 require (
