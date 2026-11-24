@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"go.mau.fi/util/l10n"
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
@@ -40,8 +41,6 @@ const (
 	loginFieldBlackbox   = "blackbox_session_id"
 	loginFieldUserAgent  = "browser_user_agent"
 	loginFieldBlog       = "blog"
-
-	loginInstructions = "Sign in to Tumblr in the window that opens, then open Messages. Beeper stores the session data needed to keep your DMs connected."
 
 	tumblrExtractJSSession = `
 new Promise(resolve => {
@@ -158,23 +157,23 @@ var _ bridgev2.LoginProcessWithParams = (*TumblrLogin)(nil)
 func (tc *TumblrConnector) GetLoginFlows() []bridgev2.LoginFlow {
 	return []bridgev2.LoginFlow{
 		{
-			Name:        "Email & password",
-			Description: "Sign in to Tumblr through Beeper.",
+			Name:        msgFlowPasswordName.Message(),
+			Description: msgFlowPasswordDescription.Message(),
 			ID:          loginFlowPassword,
 		},
 		{
-			Name:        "Browser",
-			Description: "Sign in on tumblr.com. Works with Google and Apple sign-in.",
+			Name:        msgFlowBrowserName.Message(),
+			Description: msgFlowBrowserDescription.Message(),
 			ID:          loginFlowBrowser,
 		},
 		{
-			Name:        "Google",
-			Description: "Sign in with the Google account linked to your Tumblr account.",
+			Name:        msgFlowGoogleName.Message(),
+			Description: msgFlowGoogleDescription.Message(),
 			ID:          loginFlowGoogle,
 		},
 		{
-			Name:        "Apple",
-			Description: "Sign in with the Apple account linked to your Tumblr account.",
+			Name:        msgFlowAppleName.Message(),
+			Description: msgFlowAppleDescription.Message(),
 			ID:          loginFlowApple,
 		},
 	}
@@ -236,18 +235,19 @@ func (tl *TumblrLogin) StartWithParams(_ context.Context, params bridgev2.LoginS
 	}
 	if tl.override == nil {
 		if tl.flow == loginFlowPassword {
-			return tl.credentialsStep("Enter the email and password for your Tumblr account."), nil
+			return tl.credentialsStep(msgStepCredentialsInstructions.Message()), nil
 		}
 		if tl.ssoProvider != "" {
 			return tl.cookieStep(tl.ssoInstructions()), nil
 		}
-		return tl.cookieStep(loginInstructions), nil
+		return tl.cookieStep(msgStepSignInInstructions.Message()), nil
 	}
-	loginName := "this Tumblr blog"
+	instructions := msgStepReconnectBlogInstructions.Message()
 	if strings.TrimSpace(tl.override.RemoteName) != "" {
-		loginName = "@" + strings.TrimPrefix(strings.TrimSpace(tl.override.RemoteName), "@")
+		instructions = msgStepReconnectInstructions.Render(l10n.Params{
+			"blog": "@" + strings.TrimPrefix(strings.TrimSpace(tl.override.RemoteName), "@"),
+		})
 	}
-	instructions := fmt.Sprintf("Sign in to Tumblr again to reconnect %s. This refreshes the saved session and keeps the same sending blog.", loginName)
 	if tl.flow == loginFlowPassword {
 		return tl.credentialsStep(instructions), nil
 	}
@@ -286,9 +286,9 @@ func (tl *TumblrLogin) clientHTTPRetryStep() *bridgev2.LoginStep {
 	retryCookies := tl.step == loginStepIDCookies || tl.flow == loginFlowCookies
 	tl.clearPendingAuthentication()
 	if retryCookies {
-		return tl.cookieStep("The request did not complete on this device. Please try again.")
+		return tl.cookieStep(msgStepRequestFailedInstructions.Message())
 	}
-	return tl.credentialsStep("The request did not complete on this device. Please try again.")
+	return tl.credentialsStep(msgStepRequestFailedInstructions.Message())
 }
 
 func tumblrClientHTTPError(err error) bool {
@@ -301,7 +301,7 @@ func tumblrClientHTTPError(err error) bool {
 	return false
 }
 
-func (tl *TumblrLogin) credentialsStep(instructions string) *bridgev2.LoginStep {
+func (tl *TumblrLogin) credentialsStep(instructions l10n.Message) *bridgev2.LoginStep {
 	tl.step = loginStepIDCredentials
 	return &bridgev2.LoginStep{
 		Type:         bridgev2.LoginStepTypeUserInput,
@@ -311,21 +311,21 @@ func (tl *TumblrLogin) credentialsStep(instructions string) *bridgev2.LoginStep 
 			{
 				Type:           bridgev2.LoginInputFieldTypeEmail,
 				ID:             loginFieldIdentifier,
-				Name:           "Email",
+				Name:           msgFieldEmailName.Message(),
 				Pattern:        tumblrLoginEmailPattern.String(),
 				AutofillDomain: "tumblr.com",
 			},
 			{
 				Type:           bridgev2.LoginInputFieldTypePassword,
 				ID:             loginFieldPassword,
-				Name:           "Password",
+				Name:           msgFieldPasswordName.Message(),
 				AutofillDomain: "tumblr.com",
 			},
 		}},
 	}
 }
 
-func (tl *TumblrLogin) twoFactorStep(instructions string) *bridgev2.LoginStep {
+func (tl *TumblrLogin) twoFactorStep(instructions l10n.Message) *bridgev2.LoginStep {
 	tl.step = loginStepIDTwoFactor
 	return &bridgev2.LoginStep{
 		Type:         bridgev2.LoginStepTypeUserInput,
@@ -335,14 +335,14 @@ func (tl *TumblrLogin) twoFactorStep(instructions string) *bridgev2.LoginStep {
 			{
 				Type:           bridgev2.LoginInputFieldType2FACode,
 				ID:             loginFieldTwoFactor,
-				Name:           "Authentication code",
+				Name:           msgFieldTwoFactorName.Message(),
 				AutofillDomain: "tumblr.com",
 			},
 		}},
 	}
 }
 
-func (tl *TumblrLogin) browserVerificationStep(instructions string) *bridgev2.LoginStep {
+func (tl *TumblrLogin) browserVerificationStep(instructions l10n.Message) *bridgev2.LoginStep {
 	tl.browserAttempt++
 	attempt := tl.browserAttempt
 	fields := []bridgev2.LoginCookieField{
@@ -428,7 +428,7 @@ func tumblrBrowserVerificationExtractionJS(attempt uint64) string {
 })`, attempt)
 }
 
-func (tl *TumblrLogin) blogStep(instructions string) *bridgev2.LoginStep {
+func (tl *TumblrLogin) blogStep(instructions l10n.Message) *bridgev2.LoginStep {
 	tl.step = loginStepIDBlog
 	return &bridgev2.LoginStep{
 		Type:         bridgev2.LoginStepTypeUserInput,
@@ -438,14 +438,14 @@ func (tl *TumblrLogin) blogStep(instructions string) *bridgev2.LoginStep {
 			{
 				Type:    bridgev2.LoginInputFieldTypeSelect,
 				ID:      loginFieldBlog,
-				Name:    "Tumblr inbox",
-				Options: append([]string(nil), tl.blogOptions...),
+				Name:    msgFieldBlogName.Message(),
+				Options: bridgev2.UnlocalizedOptions(tl.blogOptions...),
 			},
 		}},
 	}
 }
 
-func (tl *TumblrLogin) cookieStep(instructions string) *bridgev2.LoginStep {
+func (tl *TumblrLogin) cookieStep(instructions l10n.Message) *bridgev2.LoginStep {
 	tl.step = loginStepIDCookies
 	fields := []bridgev2.LoginCookieField{
 		{
@@ -516,15 +516,14 @@ func (tl *TumblrLogin) cookieStepURL() string {
 	return "https://www.tumblr.com/messages"
 }
 
-func (tl *TumblrLogin) ssoInstructions() string {
-	provider := "Google"
+func (tl *TumblrLogin) ssoInstructions() l10n.Message {
 	if tl.ssoProvider == "apple" {
-		provider = "Apple"
+		return msgStepSignInAppleInstructions.Message()
 	}
-	return fmt.Sprintf("Sign in with %s in the window that opens. Beeper stores the session data needed to keep your Tumblr DMs connected.", provider)
+	return msgStepSignInGoogleInstructions.Message()
 }
 
-func (tl *TumblrLogin) webLoginStep(instructions string) *bridgev2.LoginStep {
+func (tl *TumblrLogin) webLoginStep(instructions l10n.Message) *bridgev2.LoginStep {
 	tl.clearPendingAuthentication()
 	tl.browser = true
 	return tl.cookieStep(instructions)
@@ -554,28 +553,28 @@ func (tl *TumblrLogin) submitCredentials(_ context.Context, input map[string]str
 	identifier := strings.TrimSpace(input[loginFieldIdentifier])
 	password := input[loginFieldPassword]
 	if identifier == "" || password == "" {
-		return tl.credentialsStep("Enter both your Tumblr email and password."), nil
+		return tl.credentialsStep(msgStepCredentialsMissingInstructions.Message()), nil
 	}
 	if !tumblrLoginEmailPattern.MatchString(identifier) {
 		if tl.User != nil {
 			tl.User.Log.Debug().Str("identifier_kind", "non_email").Msg("Rejected Tumblr native login identifier")
 		}
-		return tl.credentialsStep("Use the email address registered to your Tumblr account, not a blog name or username."), nil
+		return tl.credentialsStep(msgStepEmailRequiredInstructions.Message()), nil
 	}
 
 	tl.identifier = identifier
 	tl.password = password
 	tl.twoFactor = ""
-	return tl.browserVerificationStep("Preparing Tumblr's secure sign-in."), nil
+	return tl.browserVerificationStep(msgStepPreparingInstructions.Message()), nil
 }
 
 func (tl *TumblrLogin) submitTwoFactor(ctx context.Context, input map[string]string) (*bridgev2.LoginStep, error) {
 	code := strings.TrimSpace(input[loginFieldTwoFactor])
 	if code == "" {
-		return tl.twoFactorStep("Enter the code from your authenticator app, or use a single-use backup code."), nil
+		return tl.twoFactorStep(msgStepTwoFactorInstructions.Message()), nil
 	}
 	tl.twoFactor = code
-	return tl.browserVerificationStep("Preparing Tumblr's secure sign-in."), nil
+	return tl.browserVerificationStep(msgStepPreparingInstructions.Message()), nil
 }
 
 func (tl *TumblrLogin) submitPassword(ctx context.Context, blackboxSessionID string) (*bridgev2.LoginStep, error) {
@@ -609,25 +608,25 @@ func (tl *TumblrLogin) submitPassword(ctx context.Context, blackboxSessionID str
 			tl.clearPendingAuthentication()
 			return nil, tumblrAccountPendingDeletionError()
 		case needsCaptcha:
-			return tl.webLoginStep(loginInstructions), nil
+			return tl.webLoginStep(msgStepSignInInstructions.Message()), nil
 		case needsTwoFactor && tl.twoFactor == "":
-			return tl.twoFactorStep("Enter the code from your authenticator app, or use a single-use backup code."), nil
+			return tl.twoFactorStep(msgStepTwoFactorInstructions.Message()), nil
 		case needsTwoFactor:
 			tl.twoFactor = ""
-			return tl.twoFactorStep("That authentication code was not accepted. Check the code and try again."), nil
+			return tl.twoFactorStep(msgStepTwoFactorRejectedInstructions.Message()), nil
 		case tumblr.IsLoginInputError(err) && tl.twoFactor != "":
 			tl.twoFactor = ""
-			return tl.twoFactorStep("That authentication code was not accepted. Check the code and try again."), nil
+			return tl.twoFactorStep(msgStepTwoFactorRejectedInstructions.Message()), nil
 		case tumblrHTTPStatus(err) == http.StatusUnauthorized:
 			tl.passwordRejections++
 			if tl.passwordRejections >= 2 {
-				return tl.webLoginStep("Tumblr still did not accept that email and password. Sign in on tumblr.com instead. This works with Google and Apple sign-in too."), nil
+				return tl.webLoginStep(msgStepPasswordRejectedBrowserInstructions.Message()), nil
 			}
 			tl.clearPendingAuthentication()
-			return tl.credentialsStep("Tumblr did not accept that email and password. Check the registered account email and password and try again."), nil
+			return tl.credentialsStep(msgStepPasswordRejectedInstructions.Message()), nil
 		case tumblr.IsLoginInputError(err):
 			tl.clearPendingAuthentication()
-			return tl.credentialsStep("Tumblr couldn't complete that sign-in. Make sure you're using the registered account email, not a blog name, and try again."), nil
+			return tl.credentialsStep(msgStepSignInFailedInstructions.Message()), nil
 		default:
 			tl.clearPendingAuthentication()
 			tl.logValidationError(err)
@@ -644,7 +643,7 @@ func (tl *TumblrLogin) submitBlog(ctx context.Context, input map[string]string) 
 	selection := strings.TrimSpace(input[loginFieldBlog])
 	blog, ok := tl.blogs[selection]
 	if !ok {
-		return tl.blogStep("Choose the Tumblr inbox you want to connect."), nil
+		return tl.blogStep(msgStepBlogInstructions.Message()), nil
 	}
 	if tl.client == nil || tl.userInfo == nil {
 		return nil, tumblrLoginSessionExpiredError()
@@ -666,15 +665,15 @@ func (tl *TumblrLogin) submitBrowserVerification(ctx context.Context, input map[
 		if tl.User != nil {
 			tl.User.Log.Debug().Msg("Tumblr browser verification returned no Blackbox session, switching to tumblr.com sign-in")
 		}
-		return tl.webLoginStep("Tumblr's secure sign-in check did not finish on this device. Sign in on tumblr.com instead. This works with Google and Apple sign-in too."), nil
+		return tl.webLoginStep(msgStepVerificationFailedBrowserInstructions.Message()), nil
 	}
 	if browserUserAgent == "" {
 		tl.clearPendingAuthentication()
-		return tl.credentialsStep("Tumblr's secure sign-in check did not finish. Enter your credentials and try again."), nil
+		return tl.credentialsStep(msgStepVerificationFailedInstructions.Message()), nil
 	}
 	if tl.client != nil && tl.browserUserAgent != browserUserAgent {
 		tl.clearPendingAuthentication()
-		return tl.credentialsStep("Tumblr's secure sign-in browser changed. Enter your credentials and try again."), nil
+		return tl.credentialsStep(msgStepVerificationBrowserChangedInstructions.Message()), nil
 	}
 	if tl.client == nil {
 		client := tumblr.NewClient(tumblr.Options{
@@ -707,7 +706,7 @@ func (tl *TumblrLogin) submitCookieInput(ctx context.Context, cookies map[string
 	}
 	browserUserAgent := normalizeOptionalHeaderCredential(cookies[loginFieldUserAgent])
 	if browserUserAgent == "" {
-		return tl.cookieStep("Tumblr's sign-in window did not return a browser identity. Please try again."), nil
+		return tl.cookieStep(msgStepNoBrowserIdentityInstructions.Message()), nil
 	}
 	client := tumblr.NewClient(tumblr.Options{
 		Cookies:    tumblr.NewCookieJar(sessionCookies),
@@ -793,7 +792,7 @@ func (tl *TumblrLogin) finishAuthentication(ctx context.Context, client *tumblr.
 		tl.blogs[label] = blog
 		tl.blogOptions = append(tl.blogOptions, label)
 	}
-	return tl.blogStep("Choose the Tumblr inbox you want to connect."), nil
+	return tl.blogStep(msgStepBlogInstructions.Message()), nil
 }
 
 func (tl *TumblrLogin) completeLogin(ctx context.Context, client *tumblr.Client, userInfo *tumblr.UserInfoResponse, blog *tumblr.Blog) (*bridgev2.LoginStep, error) {
@@ -911,7 +910,7 @@ func (tl *TumblrLogin) completeLogin(ctx context.Context, client *tumblr.Client,
 	return &bridgev2.LoginStep{
 		Type:         bridgev2.LoginStepTypeComplete,
 		StepID:       loginStepIDComplete,
-		Instructions: fmt.Sprintf("Tumblr is connected as @%s.", strings.TrimPrefix(remoteName, "@")),
+		Instructions: msgStepCompleteInstructions.Render(l10n.Params{"blog": strings.TrimPrefix(remoteName, "@")}),
 		CompleteParams: &bridgev2.LoginCompleteParams{
 			UserLoginID: userLogin.ID,
 			UserLogin:   userLogin,
